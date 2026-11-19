@@ -83,18 +83,29 @@ Auf dem Proxmox-Host in der Shell (als root):
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/gottschalkfelix4-source/easyradius/main/proxmox/easyradius-lxc.sh)"
 ```
 
-Das Skript lädt die aktuelle Debian-Vorlage, legt einen unprivilegierten Container an, installiert EasyRadius
-darin als systemd-Dienst und zeigt am Ende die Adresse der Weboberfläche. Vorgaben, die sich im Dialog
-ändern lassen:
+Im Startmenü gibt es zwei Wege: **Standard-Installation** mit sinnvollen Vorgaben oder **Erweiterte
+Einstellungen**. Dort führen Auswahllisten durch CPU-Kerne, Arbeitsspeicher, Swap und Festplatte (jeweils mit
+Vorschlägen und „Eigener Wert“), Speicher mit freiem Platz, Bridge, VLAN, DHCP oder feste IP mit Gateway und
+DNS, Containertyp, root-Passwort und Autostart. Danach lädt das Skript die aktuelle Debian-Vorlage, legt den
+Container an, bringt Debian auf den neuesten Stand und installiert EasyRadius als Dienst. Ohne root-Passwort
+meldet die Proxmox-Konsole automatisch an. Schlägt ein Schritt fehl, nennt das Skript ihn, zeigt das Protokoll
+und bietet an, den halb angelegten Container wieder zu entfernen.
 
-| Einstellung | Vorgabe |
-|---|---|
-| Container-ID | nächste freie |
-| Name | `easyradius` |
-| CPU / RAM / Swap | 1 Kern / 512 MB / 512 MB |
-| Festplatte | 4 GB auf `local-lvm` (sonst erster passender Speicher) |
-| Netzwerk | `vmbr0`, DHCP (feste IP und VLAN-Tag möglich) |
-| System | Debian 13, unprivilegiert, Autostart |
+| | | |
+|---|---|---|
+| ![Startmenü](docs/screenshots/proxmox-menue.png) | ![Auswahl Arbeitsspeicher](docs/screenshots/proxmox-auswahl.png) | ![Abschluss](docs/screenshots/proxmox-fertig.png) |
+
+| Einstellung | Vorgabe | Auswahl im erweiterten Modus |
+|---|---|---|
+| Container-ID | nächste freie | frei wählbar |
+| Name | `easyradius` | frei wählbar |
+| CPU-Kerne | 1 | 1, 2, 4 oder eigener Wert |
+| RAM / Swap | 512 MB / 512 MB | 512 – 4096 MB bzw. 0 – 1024 MB oder eigener Wert |
+| Festplatte | 4 GB auf `local-lvm` | 4, 8, 16, 32 GB oder eigener Wert; Speicher aus der Liste |
+| Netzwerk | `vmbr0`, DHCP | Bridge aus der Liste, VLAN-Tag, feste IP mit Gateway und DNS |
+| System | Debian 13, unprivilegiert, Autostart | privilegiert, ohne Autostart, root-Passwort |
+
+Das Farbschema der Dialoge lässt sich über die Variable `NEWT_COLORS` ändern.
 
 Ohne Rückfragen, z. B. mit fester IP:
 
@@ -104,7 +115,7 @@ CTID=150 CT_IP=192.168.1.20/24 CT_GW=192.168.1.1 EASYRADIUS_YES=1 \
 ```
 
 Weitere Variablen: `CT_HOSTNAME`, `CT_CORES`, `CT_RAM`, `CT_SWAP`, `CT_DISK`, `CT_STORAGE`, `CT_BRIDGE`, `CT_VLAN`,
-`CT_DNS`, `CT_PASSWORD`, `EASYRADIUS_VERSION`.
+`CT_DNS`, `CT_PASSWORD`, `CT_UNPRIVILEGED`, `CT_ONBOOT`, `EASYRADIUS_VERSION`.
 
 Aktualisieren: `pct exec <ID> -- easyradius-update`
 
