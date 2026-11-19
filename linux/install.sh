@@ -93,7 +93,7 @@ else
   step "Lade EasyRadius $VERSION ($ARCH)"
   curl -fsSL -o "$TMP/$NAME" "$URL/$NAME" || die "Download fehlgeschlagen: $URL/$NAME"
   curl -fsSL -o "$TMP/SHA256SUMS.txt" "$URL/SHA256SUMS.txt" || die "Prüfsummen nicht gefunden"
-  (cd "$TMP" && grep " $NAME\$" SHA256SUMS.txt | sha256sum -c --quiet -) || die "Prüfsumme stimmt nicht – Download beschädigt?"
+  (cd "$TMP" && grep -E "[ *]$NAME\$" SHA256SUMS.txt | sed 's/ [ *]/  /' | sha256sum -c --quiet -) || die "Prüfsumme stimmt nicht – Download beschädigt?"
   mv "$TMP/$NAME" "$TMP/paket.tar.gz"
   ok "Paket geladen und geprüft"
 fi
