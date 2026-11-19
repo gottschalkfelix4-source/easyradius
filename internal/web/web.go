@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -188,10 +189,11 @@ func (s *Server) requireAuth(h http.HandlerFunc) http.Handler {
 func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 	cfg := s.Store.Settings()
 	writeJSON(w, 200, map[string]any{
-		"setup":   cfg.AdminHash == "",
-		"user":    s.sessionUser(r),
-		"version": s.Version,
-		"server":  cfg.ServerName,
+		"setup":    cfg.AdminHash == "",
+		"user":     s.sessionUser(r),
+		"version":  s.Version,
+		"platform": runtime.GOOS,
+		"server":   cfg.ServerName,
 	})
 }
 

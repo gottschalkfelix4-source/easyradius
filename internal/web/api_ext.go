@@ -3,6 +3,7 @@ package web
 import (
 	"net/http"
 	"net/mail"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -83,7 +84,7 @@ func (s *Server) getAD(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"mode": c.Mode, "requireGroup": c.RequireGroup, "ldapUrl": c.LDAPURL, "startTls": c.StartTLS,
 		"skipVerify": c.SkipVerify, "baseDn": c.BaseDN, "bindUser": c.BindUser, "hasBindPassword": c.BindPassword != "",
-		"userAttribute": c.UserAttribute, "joined": joined, "domain": dom, "status": status,
+		"userAttribute": c.UserAttribute, "joined": joined, "domain": dom, "status": status, "platform": runtime.GOOS,
 	})
 }
 
@@ -104,6 +105,10 @@ func (s *Server) putAD(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Mode == "domain" {
 		if _, ok := directory.JoinedDomain(); !ok {
+			if runtime.GOOS != "windows" {
+				fail(w, 400, "Der Domänenmodus ist nur unter Windows möglich – unter Linux bitte LDAP wählen.")
+				return
+			}
 			fail(w, 400, "Dieser Rechner ist kein Mitglied einer Domäne. Erst der Domäne beitreten oder LDAP wählen.")
 			return
 		}

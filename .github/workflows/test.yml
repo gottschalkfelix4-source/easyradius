@@ -20,3 +20,15 @@ jobs:
       - run: go test ./...
       - run: go build -o EasyRadius.exe .
       - run: dotnet build desktop/EasyRadius.Manager/EasyRadius.Manager.csproj -c Release
+
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go vet ./internal/radiusd ./internal/web ./internal/attrs ./internal/store ./internal/letsencrypt ./internal/directory
+      - run: go test ./...
+      - run: go build -o easyradius .
+      - run: bash -n linux/install.sh && bash -n proxmox/easyradius-lxc.sh

@@ -252,12 +252,13 @@ public class AdPage : PageBase
             Body.Children.Add(new InfoBar { Title = "AD nicht verfügbar", Message = a.Status, Severity = InfoBarSeverity.Warning, IsOpen = true, IsClosable = false, Margin = new Thickness(0, 0, 0, 8) });
         var mode = a.Mode switch { "domain" => "Domäne " + a.Domain, "ldap" => "LDAP", _ => "Aus" };
         Body.Children.Add(UI.SettingCard(SymbolRegular.Building24, mode,
-            a.Joined ? $"Dieser Rechner ist Mitglied der Domäne {a.Domain}." : "Dieser Rechner ist keiner Domäne beigetreten.",
+            a.Platform != "windows" ? "EasyRadius läuft unter Linux – Active Directory ist hier per LDAP möglich."
+                : a.Joined ? $"Dieser Rechner ist Mitglied der Domäne {a.Domain}." : "Dieser Rechner ist keiner Domäne beigetreten.",
             a.Mode != "off" ? UI.Btn("Anmeldung testen", SymbolRegular.Key24, UsersPage.TestLogin) : null));
 
         Body.Children.Add(Section("Anbindung"));
         var rOff = new RadioButton { GroupName = "ad", IsChecked = a.Mode == "off", Content = "Aus – nur lokale Benutzer" };
-        var rDom = new RadioButton { GroupName = "ad", IsChecked = a.Mode == "domain", IsEnabled = a.Joined, Content = "Domänenmitglied (empfohlen) – WLAN und Geräte-Logins mit AD-Passwort, Gruppen inkl. Verschachtelung" + (a.Joined ? "" : " · erst nach Domänenbeitritt verfügbar") };
+        var rDom = new RadioButton { GroupName = "ad", IsChecked = a.Mode == "domain", IsEnabled = a.Joined, Content = "Domänenmitglied (empfohlen) – WLAN und Geräte-Logins mit AD-Passwort, Gruppen inkl. Verschachtelung" + (a.Joined ? "" : a.Platform != "windows" ? " · nur wenn EasyRadius unter Windows läuft" : " · erst nach Domänenbeitritt verfügbar") };
         var rLdap = new RadioButton { GroupName = "ad", IsChecked = a.Mode == "ldap", Content = "LDAP – ohne Domänenbeitritt; nur für Switch-/Router-/VPN-Logins (PAP), nicht für WLAN" };
         var radios = new StackPanel();
         foreach (var r in new[] { rOff, rDom, rLdap }) { r.Margin = new Thickness(0, 4, 0, 4); radios.Children.Add(r); }
@@ -308,7 +309,7 @@ public class AdPage : PageBase
         {
             Style = UI.Style("Muted"), Margin = new Thickness(0, 16, 0, 0),
             Text = "Lokale Benutzer haben immer Vorrang vor gleichnamigen AD-Konten. Anmeldenamen dürfen als name, FIRMA\\name oder name@firma.local eingegeben werden."
-                + (a.Joined ? "" : "\nFür WLAN mit AD-Passwörtern muss der Rechner der Domäne beitreten (Einstellungen → Konten → Auf Arbeits- oder Schulkonto zugreifen). Danach den EasyRadius-Dienst neu starten."),
+                + (a.Joined || a.Platform != "windows" ? "" : "\nFür WLAN mit AD-Passwörtern muss der Rechner der Domäne beitreten (Einstellungen → Konten → Auf Arbeits- oder Schulkonto zugreifen). Danach den EasyRadius-Dienst neu starten."),
         });
     }
 }
@@ -365,7 +366,7 @@ public class SettingsPage : PageBase
 
         Body.Children.Add(Section("Info"));
         var ver = typeof(App).Assembly.GetName().Version;
-        Body.Children.Add(UI.SettingCard(SymbolRegular.Info24, "EasyRadius", $"Server-Version {App.State.Version} · Verwaltung {ver?.ToString(3)}", null));
+        Body.Children.Add(UI.SettingCard(SymbolRegular.Info24, "EasyRadius", $"Server-Version {App.State.Version} ({(App.State.Platform == "windows" ? "Windows" : "Linux")}) · Verwaltung {ver?.ToString(3)}", null));
         Body.Children.Add(UI.SettingCard(SymbolRegular.Wifi124, "Unterstützte Verfahren", "WPA2/WPA3-Enterprise (PEAP-MSCHAPv2), PAP, MS-CHAPv2, VLAN, Check-/Reply-Attribute, Accounting", null));
     }
 

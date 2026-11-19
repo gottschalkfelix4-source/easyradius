@@ -3,7 +3,7 @@ using System.Windows.Media;
 
 namespace EasyRadius.Manager;
 
-public class StateInfo { public bool Setup { get; set; } public string User { get; set; } = ""; public string Version { get; set; } = ""; public string Server { get; set; } = ""; }
+public class StateInfo { public bool Setup { get; set; } public string User { get; set; } = ""; public string Version { get; set; } = ""; public string Server { get; set; } = ""; public string Platform { get; set; } = "windows"; }
 
 public class Attr
 {
@@ -184,6 +184,7 @@ public class AdInfo
     public bool Joined { get; set; }
     public string Domain { get; set; } = "";
     public string Status { get; set; } = "";
+    public string Platform { get; set; } = "windows";
 }
 
 public class SettingsInfo { public int AuthPort { get; set; } public int AcctPort { get; set; } public string WebAddr { get; set; } = ""; public string ServerName { get; set; } = ""; public string AdminUser { get; set; } = ""; }

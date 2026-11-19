@@ -711,7 +711,7 @@ VIEWS.ad = async (main) => {
     <div class="card"><div class="row" style="gap:16px">
       <span class="stat"><span class="ico" style="width:48px;height:48px">${icon("building")}</span></span>
       <div style="flex:1"><div style="font:600 20px/28px 'Segoe UI Variable Display','Segoe UI',sans-serif">${esc(modeText)}</div>
-        <div class="muted">${a.joined ? `Dieser Rechner ist Mitglied der Domäne <b>${esc(a.domain)}</b>.` : "Dieser Rechner ist keiner Domäne beigetreten."}</div></div>
+        <div class="muted">${a.platform !== "windows" ? "EasyRadius läuft unter Linux – Active Directory ist hier per LDAP möglich." : a.joined ? `Dieser Rechner ist Mitglied der Domäne <b>${esc(a.domain)}</b>.` : "Dieser Rechner ist keiner Domäne beigetreten."}</div></div>
       ${a.mode !== "off" ? `<button class="btn" data-action="testUser">${icon("key")} Anmeldung testen</button>` : ""}
     </div></div>
     <form id="adform" novalidate><div class="msg" style="margin-top:12px"></div>
@@ -719,7 +719,7 @@ VIEWS.ad = async (main) => {
     <div class="card">
       <label class="switch"><input type="radio" name="mode" value="off" ${a.mode === "off" ? "checked" : ""} style="border-radius:50%"> <span><b>Aus</b> – nur lokale Benutzer</span></label>
       <label class="switch"><input type="radio" name="mode" value="domain" ${a.mode === "domain" ? "checked" : ""} ${a.joined ? "" : "disabled"} style="border-radius:50%">
-        <span><b>Domänenmitglied</b> (empfohlen) – WLAN und Geräte-Logins mit AD-Passwort, Gruppen inkl. Verschachtelung. ${a.joined ? "" : '<span class="muted">Erst nach Domänenbeitritt verfügbar.</span>'}</span></label>
+        <span><b>Domänenmitglied</b> (empfohlen) – WLAN und Geräte-Logins mit AD-Passwort, Gruppen inkl. Verschachtelung. ${a.joined ? "" : a.platform !== "windows" ? '<span class="muted">Nur wenn EasyRadius unter Windows läuft.</span>' : '<span class="muted">Erst nach Domänenbeitritt verfügbar.</span>'}</span></label>
       <label class="switch" style="margin-bottom:0"><input type="radio" name="mode" value="ldap" ${a.mode === "ldap" ? "checked" : ""} style="border-radius:50%">
         <span><b>LDAP</b> – ohne Domänenbeitritt. Nur für Switch-/Router-/VPN-Logins (PAP), <b>nicht für WLAN</b>.</span></label>
     </div>
@@ -740,7 +740,7 @@ VIEWS.ad = async (main) => {
     </form>
     <div class="callout" style="margin-top:16px"><h3>Hinweise</h3>
       Lokale Benutzer haben immer Vorrang vor gleichnamigen AD-Konten. Anmeldenamen dürfen als <span class="mono">name</span>, <span class="mono">FIRMA\\name</span> oder <span class="mono">name@firma.local</span> eingegeben werden.
-      ${a.joined ? "" : "<br>Für WLAN mit AD-Passwörtern muss der Rechner der Domäne beitreten (Einstellungen → Konten → Auf Arbeits- oder Schulkonto zugreifen → „Diesen Computer einer lokalen Active Directory-Domäne hinzufügen“). Danach EasyRadius-Dienst neu starten."}</div>`;
+      ${a.joined || a.platform !== "windows" ? "" : "<br>Für WLAN mit AD-Passwörtern muss der Rechner der Domäne beitreten (Einstellungen → Konten → Auf Arbeits- oder Schulkonto zugreifen → „Diesen Computer einer lokalen Active Directory-Domäne hinzufügen“). Danach EasyRadius-Dienst neu starten."}</div>`;
   const f = $("#adform");
   f.querySelectorAll("input[name=mode]").forEach((r) => r.onchange = () => { $("#ldapbox").style.display = f.mode.value === "ldap" ? "" : "none"; });
   f.onsubmit = async (e) => {

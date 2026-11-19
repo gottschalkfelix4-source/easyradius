@@ -1,16 +1,19 @@
-// EasyRadius – ein einfacher RADIUS-Server mit Weboberfläche für Windows.
+// EasyRadius – ein einfacher RADIUS-Server mit Weboberfläche (Windows und Linux).
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gottschalkfelix4-source/easyradius/internal/certs"
@@ -33,18 +36,32 @@ type app struct {
 }
 
 func defaultDataDir() string {
-	if pd := os.Getenv("ProgramData"); pd != "" {
-		return filepath.Join(pd, "EasyRadius")
+	if runtime.GOOS == "windows" {
+		if pd := os.Getenv("ProgramData"); pd != "" {
+			return filepath.Join(pd, "EasyRadius")
+		}
+		return "data"
 	}
-	return "data"
+	// systemd setzt STATE_DIRECTORY (StateDirectory=easyradius).
+	if sd := os.Getenv("STATE_DIRECTORY"); sd != "" {
+		return sd
+	}
+	return "/var/lib/easyradius"
 }
 
 func start(dataDir string) (*app, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, err
 	}
+	if runtime.GOOS != "windows" {
+		secureDir(dataDir)
+	}
 	if f, err := os.OpenFile(filepath.Join(dataDir, "easyradius.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
-		log.SetOutput(f)
+		if runtime.GOOS == "windows" {
+			log.SetOutput(f)
+		} else {
+			log.SetOutput(io.MultiWriter(f, os.Stderr)) // zusätzlich ins Journal
+		}
 	}
 	st, err := store.Open(dataDir)
 	if err != nil {
@@ -95,7 +112,12 @@ func (a *app) stop() {
 
 func main() {
 	dataDir := flag.String("data", defaultDataDir(), "Datenverzeichnis")
+	showVersion := flag.Bool("version", false, "Version anzeigen")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	if flag.Arg(0) == "open" {
 		// Startmenü-Verknüpfung: Weboberfläche öffnen.
@@ -127,9 +149,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Start fehlgeschlagen:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("EasyRadius %s läuft. Weboberfläche: http://localhost%s  (Strg+C beendet)\n", version, a.http.Addr)
+	if os.Getenv("INVOCATION_ID") == "" { // nicht unter systemd: Hinweis für die Konsole
+		fmt.Printf("EasyRadius %s läuft. Weboberfläche: http://localhost%s  (Strg+C beendet)\n", version, a.http.Addr)
+	}
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	<-sig
 	a.stop()
 }
