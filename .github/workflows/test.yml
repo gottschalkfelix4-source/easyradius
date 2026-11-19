@@ -9,10 +9,14 @@ jobs:
   test:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
       - run: go vet ./internal/radiusd ./internal/web ./internal/attrs ./internal/store ./internal/letsencrypt
       - run: go test ./...
       - run: go build -o EasyRadius.exe .
+      - run: dotnet build desktop/EasyRadius.Manager/EasyRadius.Manager.csproj -c Release

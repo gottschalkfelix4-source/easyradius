@@ -5,13 +5,14 @@
 <h1 align="center">EasyRadius</h1>
 
 <p align="center">
-  RADIUS-Server für Windows mit Weboberfläche – für WPA2/WPA3-Enterprise-WLAN und den Login an Switches.<br>
-  Ein Installer, ein Dienst, keine Konfigurationsdateien.
+  RADIUS-Server für Windows – für WPA2/WPA3-Enterprise-WLAN und den Login an Switches.<br>
+  Verwaltung per Windows-App oder im Browser. Ein Installer, ein Dienst, keine Konfigurationsdateien.
 </p>
 
 <p align="center">
   <a href="../../releases/latest"><b>Download</b></a> ·
   <a href="#installation">Installation</a> ·
+  <a href="#windows-app-und-weboberfläche">Windows-App</a> ·
   <a href="#gruppen-check--und-reply-attribute">Attribute</a> ·
   <a href="#active-directory">Active Directory</a> ·
   <a href="#selbst-bauen">Selbst bauen</a>
@@ -26,7 +27,8 @@ Die üblichen Kandidaten sind FreeRADIUS (Textdateien, Linux) oder Microsofts NP
 Dialoge, Rollen, Richtlinien). EasyRadius ist der Versuch, das auf das Nötige zu reduzieren:
 MSI installieren, im Browser einen Access Point und ein paar Benutzer anlegen, fertig.
 
-Die Oberfläche ist auf Deutsch und orientiert sich am Aussehen von Windows 11.
+Verwaltet wird über eine Windows-App im Stil von Windows 11 oder – von jedem anderen Rechner im Netz – über
+die Weboberfläche. Beide können dasselbe. Alles ist auf Deutsch.
 
 ## Funktionen
 
@@ -41,6 +43,8 @@ Die Oberfläche ist auf Deutsch und orientiert sich am Aussehen von Windows 11.
 - **Einrichtungsseite für Endgeräte** mit QR-Code – das Handy zeigt die passenden Schritte für sein System
 - **Live-Protokoll** mit verständlichen Gründen, warum eine Anmeldung abgelehnt wurde
 - **Accounting**: wer gerade verbunden ist
+- **Windows-App** (WPF, Fluent-Design, Mica) und **Weboberfläche** mit gleichem Funktionsumfang; die App
+  kann auch einen EasyRadius auf einem anderen Rechner verwalten
 - Läuft als Windows-Dienst, Daten in einer JSON-Datei, keine Datenbank
 
 | | |
@@ -52,16 +56,35 @@ Die Oberfläche ist auf Deutsch und orientiert sich am Aussehen von Windows 11.
 ## Installation
 
 1. `EasyRadius-<Version>.msi` aus den [Releases](../../releases/latest) herunterladen und ausführen.
-2. Der Browser öffnet `http://localhost:8088` – dort einen Administrator anlegen.
+2. Die Verwaltung startet automatisch – dort einen Administrator anlegen.
 3. Unter **Geräte** den Access Point oder Switch mit seiner IP-Adresse freigeben. Ein Shared Secret wird
    vorgeschlagen.
 4. Unter **Benutzer** die ersten Konten anlegen.
 
 Der Installer richtet den Dienst *EasyRadius RADIUS-Server* ein (Autostart, Neustart bei Absturz) sowie
-Firewall-Regeln für UDP 1812/1813, TCP 8088 (nur lokales Netz) und TCP 80 (nur für die
-Let's-Encrypt-Prüfung). Die Startmenü-Verknüpfung öffnet die Oberfläche als eigenes Fenster.
+Firewall-Regeln für UDP 1812/1813, TCP 8088 (Weboberfläche, nur in privaten und Domänen-Netzwerken) und
+TCP 80 (nur für die Let's-Encrypt-Prüfung). Im Startmenü stehen „EasyRadius“ (Windows-App) und
+„EasyRadius Weboberfläche“.
+
+Das Installationspaket ist rund 70 MB groß, weil die Windows-App ihre .NET-Laufzeit mitbringt – auf dem
+Rechner muss nichts zusätzlich installiert sein.
 
 Voraussetzung: Windows 10/11 oder Windows Server 2016 und neuer, 64 Bit.
+
+## Windows-App und Weboberfläche
+
+Die **Windows-App** („EasyRadius“ im Startmenü) ist der bequemste Weg auf dem Server selbst. Beim Anmelden
+lässt sich aber auch die Adresse eines anderen EasyRadius eintragen – die App funktioniert dann als
+Verwaltungskonsole von einem Arbeitsplatz aus. Das Passwort kann sie, mit Windows verschlüsselt, für den
+angemeldeten Windows-Benutzer speichern.
+
+Die **Weboberfläche** unter `http://<server>:8088` ist für alles andere da: ein Rechner ohne App, ein Mac,
+ein Tablet. Unter *Einstellungen → Fernzugriff* zeigt die App, unter welchen Adressen sie erreichbar ist.
+
+| | |
+|---|---|
+| ![Windows-App: Benutzer](docs/screenshots/app-benutzer.png) | ![Windows-App: Gruppe bearbeiten](docs/screenshots/app-gruppe-dialog.png) |
+| ![Windows-App: Gruppen, dunkel](docs/screenshots/app-gruppen-dunkel.png) | ![Windows-App: Active Directory](docs/screenshots/app-ad.png) |
 
 ## Access Point oder Switch einrichten
 
@@ -147,8 +170,9 @@ Der RADIUS-Server selbst muss bei den DNS-Wegen nicht aus dem Internet erreichba
 - Passwörter werden als NT-Hash gespeichert, weil MS-CHAPv2 ihn braucht. Das Admin-Passwort der
   Oberfläche als bcrypt-Hash.
 - EAP-Anfragen ohne gültigen Message-Authenticator werden verworfen; alle Antworten tragen einen.
-- Die Weboberfläche läuft über HTTP. Für Zugriff von außerhalb des lokalen Netzes einen Reverse-Proxy
-  mit HTTPS davorschalten.
+- Die Weboberfläche (und damit auch die Verbindung der Windows-App) läuft über HTTP. Für Zugriff über
+  unsichere Netze einen Reverse-Proxy mit HTTPS davorschalten; die App kann sich auch mit `https://…`
+  verbinden.
 
 ## Grenzen
 
@@ -156,17 +180,19 @@ Der RADIUS-Server selbst muss bei den DNS-Wegen nicht aus dem Internet erreichba
 - Die AD-Anbindung im Domänenmodus ist bisher nur mit einem simulierten Verzeichnis automatisiert getestet,
   der Let's-Encrypt-Abruf noch nicht mit jedem DNS-Anbieter. Erfahrungsberichte aus echten Umgebungen sind
   willkommen – gerne als Issue.
-- Die Oberfläche gibt es nur auf Deutsch.
+- Die Oberflächen gibt es nur auf Deutsch.
 
 ## Selbst bauen
 
-Voraussetzungen: Go 1.27 oder neuer und das .NET SDK (für WiX 5, wird als lokales Tool geladen).
+Voraussetzungen: Go 1.27 oder neuer und das .NET 8 SDK (für die Windows-App und WiX 5, das als lokales
+Tool geladen wird).
 
 ```powershell
-.\build.ps1 -Version 1.4.0
+.\build.ps1 -Version 1.5.0
 ```
 
-Ergebnis in `build\`: `EasyRadius.exe`, `EasyRadius-1.4.0.msi` und `radtest.exe`.
+Ergebnis in `build\`: `EasyRadius.exe` (Dienst), `manager\EasyRadiusManager.exe` (Windows-App),
+`EasyRadius-1.5.0.msi` und `radtest.exe`.
 Zum Ausprobieren ohne Installation:
 
 ```powershell
@@ -189,6 +215,7 @@ Zum Ausprobieren ohne Installation:
 | `internal/certs` | eigene CA und Serverzertifikat |
 | `internal/store` | Benutzer, Gruppen, Geräte, Einstellungen |
 | `internal/web` | Weboberfläche und API |
+| `desktop/EasyRadius.Manager` | Windows-App (WPF, [WPF-UI](https://github.com/lepoco/wpfui)) |
 | `installer/` | WiX-Installer |
 | `tools/radtest` | Testclient |
 | `tools/genproviders` | erzeugt die DNS-Anbieterliste aus lego |
@@ -197,4 +224,5 @@ Zum Ausprobieren ohne Installation:
 
 [MIT](LICENSE). Verwendete Bibliotheken: [layeh/radius](https://github.com/layeh/radius) (BSD-3),
 [go-acme/lego](https://github.com/go-acme/lego) (MIT), [go-ldap](https://github.com/go-ldap/ldap) (MIT),
-[rsc.io/qr](https://github.com/rsc/qr) (BSD-3), [golang.org/x](https://cs.opensource.google/go/x) (BSD-3).
+[rsc.io/qr](https://github.com/rsc/qr) (BSD-3), [golang.org/x](https://cs.opensource.google/go/x) (BSD-3),
+[WPF-UI](https://github.com/lepoco/wpfui) (MIT).

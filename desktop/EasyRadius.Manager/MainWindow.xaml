@@ -1,0 +1,64 @@
+﻿<ui:FluentWindow
+    x:Class="EasyRadius.Manager.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+    xmlns:local="clr-namespace:EasyRadius.Manager"
+    Title="EasyRadius"
+    Width="1240" Height="820" MinWidth="900" MinHeight="600"
+    WindowStartupLocation="CenterScreen"
+    ExtendsContentIntoTitleBar="True"
+    WindowBackdropType="Mica"
+    WindowCornerPreference="Round">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <ui:TitleBar x:Name="Bar" Title="EasyRadius" Grid.Row="0">
+            <ui:TitleBar.Icon>
+                <ui:SymbolIcon Symbol="Wifi124" />
+            </ui:TitleBar.Icon>
+        </ui:TitleBar>
+
+        <ui:NavigationView x:Name="Nav" Grid.Row="1" PaneDisplayMode="Left" IsBackButtonVisible="Collapsed"
+                           IsPaneToggleVisible="True" OpenPaneLength="260" Padding="40,0,40,0">
+            <ui:NavigationView.MenuItems>
+                <ui:NavigationViewItem Content="Übersicht" TargetPageType="{x:Type local:DashboardPage}">
+                    <ui:NavigationViewItem.Icon><ui:SymbolIcon Symbol="Home24" /></ui:NavigationViewItem.Icon>
+                </ui:NavigationViewItem>
+                <ui:NavigationViewItem Content="Benutzer" TargetPageType="{x:Type local:UsersPage}">
+                    <ui:NavigationViewItem.Icon><ui:SymbolIcon Symbol="People24" /></ui:NavigationViewItem.Icon>
+                </ui:NavigationViewItem>
+                <ui:NavigationViewItem Content="Gruppen" TargetPageType="{x:Type local:GroupsPage}">
+                    <ui:NavigationViewItem.Icon><ui:SymbolIcon Symbol="PeopleTeam24" /></ui:NavigationViewItem.Icon>
+                </ui:NavigationViewItem>
+                <ui:NavigationViewItem Content="Geräte" TargetPageType="{x:Type local:ClientsPage}">
+                    <ui:NavigationViewItem.Icon><ui:SymbolIcon Symbol="Router24" /></ui:NavigationViewItem.Icon>
+                </ui:NavigationViewItem>
+                <ui:NavigationViewItem Content="Protokoll" TargetPageType="{x:Type local:LogPage}">
+                    <ui:NavigationViewItem.Icon><ui:SymbolIcon Symbol="TextBulletListLtr24" /></ui:NavigationViewItem.Icon>
+                </ui:NavigationViewItem>
+                <ui:NavigationViewItem Content="Zertifikat" TargetPageType="{x:Type local:CertPage}">
+                    <ui:NavigationViewItem.Icon><ui:SymbolIcon Symbol="ShieldCheckmark24" /></ui:NavigationViewItem.Icon>
+                </ui:NavigationViewItem>
+                <ui:NavigationViewItem Content="Active Directory" TargetPageType="{x:Type local:AdPage}">
+                    <ui:NavigationViewItem.Icon><ui:SymbolIcon Symbol="Building24" /></ui:NavigationViewItem.Icon>
+                </ui:NavigationViewItem>
+            </ui:NavigationView.MenuItems>
+            <ui:NavigationView.FooterMenuItems>
+                <ui:NavigationViewItem Content="Einstellungen" TargetPageType="{x:Type local:SettingsPage}">
+                    <ui:NavigationViewItem.Icon><ui:SymbolIcon Symbol="Settings24" /></ui:NavigationViewItem.Icon>
+                </ui:NavigationViewItem>
+            </ui:NavigationView.FooterMenuItems>
+            <ui:NavigationView.ContentOverlay>
+                <Grid>
+                    <ui:SnackbarPresenter x:Name="Snackbars" />
+                </Grid>
+            </ui:NavigationView.ContentOverlay>
+        </ui:NavigationView>
+
+        <ui:ContentDialogHost x:Name="DialogHost" Grid.Row="0" Grid.RowSpan="2" />
+    </Grid>
+</ui:FluentWindow>

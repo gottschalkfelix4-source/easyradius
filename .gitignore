@@ -7,3 +7,5 @@ data/
 *.exe
 *.msi
 *.syso
+bin/
+obj/

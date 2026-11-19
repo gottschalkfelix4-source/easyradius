@@ -1,4 +1,4 @@
-# Baut EasyRadius.exe und den Installer (MSI).
+﻿# Baut EasyRadius.exe und den Installer (MSI).
 #   .\build.ps1 -Version 1.0.0
 param([string]$Version = "1.0.0")
 $ErrorActionPreference = "Stop"
@@ -16,6 +16,12 @@ go build -trimpath -ldflags "-s -w -X main.version=$Version" -o build\EasyRadius
 if ($LASTEXITCODE -ne 0) { throw "Build fehlgeschlagen" }
 go build -trimpath -ldflags "-s -w" -o build\radtest.exe .\tools\radtest
 if ($LASTEXITCODE -ne 0) { throw "Build radtest fehlgeschlagen" }
+
+Write-Host "Baue Verwaltungs-App ..." -ForegroundColor Cyan
+dotnet publish desktop\EasyRadius.Manager\EasyRadius.Manager.csproj -c Release -r win-x64 --self-contained true `
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true `
+  -p:DebugType=none -p:Version=$Version -o build\manager
+if ($LASTEXITCODE -ne 0) { throw "Build der Verwaltungs-App fehlgeschlagen" }
 
 Write-Host "Baue Installer ..." -ForegroundColor Cyan
 dotnet tool restore | Out-Null

@@ -27,17 +27,15 @@
 
     <Feature Id="Main" Title="EasyRadius" Level="1">
       <ComponentRef Id="MainExe" />
+      <ComponentRef Id="ManagerExe" />
       <ComponentRef Id="Firewall" />
     </Feature>
 
     <DirectoryRef Id="INSTALLFOLDER">
       <Component Id="MainExe" Guid="1C9E5B0A-7E54-4C55-9C8F-0A6C2B7D8E91" Bitness="always64">
         <File Id="EasyRadiusExe" Source="build\EasyRadius.exe" KeyPath="yes">
-          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="EasyRadius"
-                    Description="Weboberfläche von EasyRadius öffnen" Arguments="open"
-                    Icon="AppIcon" Advertise="no" WorkingDirectory="INSTALLFOLDER" />
-          <Shortcut Id="DesktopShortcut" Directory="DesktopFolder" Name="EasyRadius"
-                    Description="Weboberfläche von EasyRadius öffnen" Arguments="open"
+          <Shortcut Id="WebShortcut" Directory="ProgramMenuFolder" Name="EasyRadius Weboberfläche"
+                    Description="Weboberfläche von EasyRadius im Browser öffnen" Arguments="open"
                     Icon="AppIcon" Advertise="no" WorkingDirectory="INSTALLFOLDER" />
         </File>
         <File Id="IconFile" Source="assets\icon.ico" />
@@ -60,6 +58,15 @@
         <ServiceControl Id="SvcControl" Name="EasyRadius" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
       </Component>
 
+      <Component Id="ManagerExe" Guid="8A3F2C61-4D7E-4B9A-B1C5-2E6F7A8B9C0D" Bitness="always64">
+        <File Id="ManagerFile" Source="build\manager\EasyRadiusManager.exe" KeyPath="yes">
+          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="EasyRadius"
+                    Description="EasyRadius verwalten" Advertise="no" WorkingDirectory="INSTALLFOLDER" />
+          <Shortcut Id="DesktopShortcut" Directory="DesktopFolder" Name="EasyRadius"
+                    Description="EasyRadius verwalten" Advertise="no" WorkingDirectory="INSTALLFOLDER" />
+        </File>
+      </Component>
+
       <Component Id="Firewall" Guid="5B2E8D41-0F3C-4A7B-8E6D-9C1A2B3D4E5F" Bitness="always64">
         <CreateFolder />
         <fw:FirewallException Id="FwRadiusAuth" Name="EasyRadius RADIUS (UDP 1812)"
@@ -69,14 +76,16 @@
         <fw:FirewallException Id="FwAcmeHttp" Name="EasyRadius Let's-Encrypt-Prüfung (TCP 80)"
                               Port="80" Protocol="tcp" Scope="any" Profile="all" />
         <fw:FirewallException Id="FwWeb" Name="EasyRadius Weboberfläche (TCP 8088)"
-                              Port="8088" Protocol="tcp" Scope="localSubnet" Profile="all" />
+                              Port="8088" Protocol="tcp" Scope="any" Profile="private" />
+        <fw:FirewallException Id="FwWebDomain" Name="EasyRadius Weboberfläche im Firmennetz (TCP 8088)"
+                              Port="8088" Protocol="tcp" Scope="any" Profile="domain" />
       </Component>
     </DirectoryRef>
 
-    <!-- Nach der Erstinstallation die Weboberfläche öffnen (nicht bei stiller Installation). -->
-    <CustomAction Id="OpenWebUI" FileRef="EasyRadiusExe" ExeCommand="open" Return="asyncNoWait" Execute="immediate" />
+    <!-- Nach der Erstinstallation die Verwaltung öffnen (nicht bei stiller Installation). -->
+    <CustomAction Id="OpenManager" FileRef="ManagerFile" ExeCommand="" Return="asyncNoWait" Execute="immediate" Impersonate="yes" />
     <InstallExecuteSequence>
-      <Custom Action="OpenWebUI" After="InstallFinalize" Condition="NOT Installed AND NOT REMOVE AND UILevel &gt; 3" />
+      <Custom Action="OpenManager" After="InstallFinalize" Condition="NOT Installed AND NOT REMOVE AND UILevel &gt; 3" />
     </InstallExecuteSequence>
   </Package>
 </Wix>
