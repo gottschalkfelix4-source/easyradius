@@ -5,6 +5,8 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/md5"
 	"crypto/rand"
 	"flag"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"layeh.com/radius/rfc2759"
 	"layeh.com/radius/rfc2865"
 	"layeh.com/radius/rfc2868"
+	"layeh.com/radius/rfc2869"
 	"layeh.com/radius/vendors/microsoft"
 )
 
@@ -28,6 +31,7 @@ func main() {
 	from := flag.String("from", "", "lokale Absender-IP (optional)")
 	ssid := flag.String("ssid", "", "SSID, die der Access Point meldet (optional)")
 	portType := flag.Int("porttype", -1, "NAS-Port-Type (15 = Ethernet, 19 = WLAN, 5 = Virtual/SSH)")
+	noMA := flag.Bool("noma", false, "ohne Message-Authenticator senden (wie ältere Switches)")
 	flag.Parse()
 	if *secret == "" || *user == "" {
 		flag.Usage()
@@ -60,6 +64,9 @@ func main() {
 		os.Exit(2)
 	}
 
+	if !*noMA {
+		addMA(p)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	client := &radius.Client{Retry: time.Second}
@@ -93,5 +100,21 @@ func main() {
 	}
 	if r.Code != radius.CodeAccessAccept {
 		os.Exit(1)
+	}
+}
+
+// addMA fügt einen Message-Authenticator hinzu (RFC 3579), wie es aktuelle Access Points tun.
+func addMA(p *radius.Packet) {
+	p.Add(rfc2869.MessageAuthenticator_Type, make(radius.Attribute, 16))
+	b, err := p.MarshalBinary()
+	if err != nil {
+		return
+	}
+	m := hmac.New(md5.New, p.Secret)
+	m.Write(b)
+	for _, a := range p.Attributes {
+		if a.Type == rfc2869.MessageAuthenticator_Type {
+			a.Attribute = m.Sum(nil)
+		}
 	}
 }

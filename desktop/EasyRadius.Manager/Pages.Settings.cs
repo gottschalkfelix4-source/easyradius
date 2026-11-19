@@ -34,16 +34,16 @@ public class CertPage : PageBase
         var le = await leTask;
         Body.Children.Clear();
 
-        var host = App.Api.BaseUri.Host;
-        var local = host is "localhost" or "127.0.0.1" or "::1";
-        var baseUrl = local && dash.Ips.Count > 0 ? $"http://{dash.Ips[0]}:{App.Api.BaseUri.Port}" : App.Api.BaseUri.ToString().TrimEnd('/');
+        // Uri.Host liefert IPv6 mit Klammern („[::1]“) – daher IdnHost und IPAddress.IsLoopback verwenden.
+        var local = ApiClient.IsLoopbackHost(App.Api.BaseUri.IdnHost);
+        var baseUrl = local && dash.Ips.Count > 0 ? $"{App.Api.BaseUri.Scheme}://{UrlHost(dash.Ips[0])}:{App.Api.BaseUri.Port}" : App.Api.BaseUri.ToString().TrimEnd('/');
         var onboard = baseUrl + "/einrichten";
         var days = (int)(c.NotAfter - DateTime.UtcNow).TotalDays;
         var issuer = c.Public ? "öffentliche Zertifizierungsstelle" : c.SelfSigned ? "eigene Zertifizierungsstelle" : "eigenes Zertifikat";
 
         // Kopf-Karte
         var info = new StackPanel();
-        info.Children.Add(new TextBlock { Text = c.Subject, FontSize = 20, FontWeight = FontWeights.SemiBold, Foreground = UI.Brush("TextFillColorPrimaryBrush") });
+        info.Children.Add(new TextBlock { Text = c.Subject, FontSize = 20, FontWeight = FontWeights.SemiBold }.Fg());
         info.Children.Add(new TextBlock { Text = $"Ausgestellt von {c.Issuer} ({issuer})", Style = UI.Style("Muted") });
         info.Children.Add(new TextBlock
         {
@@ -66,7 +66,7 @@ public class CertPage : PageBase
         }
         catch { }
         var qrText = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-        qrText.Children.Add(new TextBlock { Text = "Mit dem Handy scannen", FontWeight = FontWeights.SemiBold, Foreground = UI.Brush("TextFillColorPrimaryBrush") });
+        qrText.Children.Add(new TextBlock { Text = "Mit dem Handy scannen", FontWeight = FontWeights.SemiBold }.Fg());
         qrText.Children.Add(new TextBlock { Text = "Öffnet eine Anleitung für Android, iPhone, Windows und Mac – mit den passenden Werten" + (c.HasCa ? " und dem Zertifikat zum Herunterladen." : "."), Style = UI.Style("Muted"), MaxWidth = 520, Margin = new Thickness(0, 4, 0, 10) });
         qrText.Children.Add(UI.Hstack(
             UI.Btn("Anleitung öffnen", SymbolRegular.Phone24, () => { Open(onboard); return Task.CompletedTask; }),
@@ -82,22 +82,22 @@ public class CertPage : PageBase
             ? $"Status: {state} · Domain {le.Domain} · {method}" + (le.LastSuccess.Year > 2000 ? $" · zuletzt erneuert {Fmt.Rel(le.LastSuccess)}" : "") + (le.Staging ? " · Testsystem" : "")
             : "Mit eigener Domain brauchen Android-Geräte keine Zertifikat-Installation mehr („Systemzertifikate verwenden“).";
         Body.Children.Add(UI.SettingCard(SymbolRegular.Globe24, "Öffentliches Zertifikat", desc, le.Enabled
-            ? UI.Hstack(UI.Btn("Jetzt erneuern", SymbolRegular.ArrowSync24, async () => { await App.Api.Call(HttpMethod.Post, "/api/acme/run"); await UI.Toast("Zertifikat wird beantragt …"); await Reload(); }),
-                        UI.Btn("Ändern", SymbolRegular.Edit24, async () => { if (await AcmeDialog()) await Reload(); }))
-            : UI.Btn("Einrichten", SymbolRegular.Add24, async () => { if (await AcmeDialog()) await Reload(); }, ControlAppearance.Primary)));
+            ? UI.Hstack(UI.Btn("Jetzt erneuern", SymbolRegular.ArrowSync24, async () => { await App.Api.Call(HttpMethod.Post, "/api/acme/run"); await UI.Toast("Zertifikat wird beantragt …"); await Reload(); }).AdminOnly(),
+                        UI.Btn("Ändern", SymbolRegular.Edit24, async () => { if (await AcmeDialog()) await Reload(); }).AdminOnly())
+            : UI.Btn("Einrichten", SymbolRegular.Add24, async () => { if (await AcmeDialog()) await Reload(); }, ControlAppearance.Primary).AdminOnly()));
         if (le.LastError != "")
             Body.Children.Add(new InfoBar { Title = "Let's Encrypt", Message = le.LastError, Severity = InfoBarSeverity.Error, IsOpen = true, IsClosable = false, Margin = new Thickness(0, 4, 0, 4) });
         if (le.CnameName != "")
         {
             var sp = new StackPanel();
-            sp.Children.Add(new TextBlock { Text = "Noch ein Schritt: CNAME-Eintrag anlegen", FontWeight = FontWeights.SemiBold, Foreground = UI.Brush("TextFillColorPrimaryBrush") });
+            sp.Children.Add(new TextBlock { Text = "Noch ein Schritt: CNAME-Eintrag anlegen", FontWeight = FontWeights.SemiBold }.Fg());
             sp.Children.Add(new TextBlock { Text = "Lege bei deinem Domain-Anbieter einmalig diesen DNS-Eintrag an. Danach erneuert EasyRadius das Zertifikat dauerhaft automatisch.", Style = UI.Style("Muted"), Margin = new Thickness(0, 4, 0, 10) });
-            sp.Children.Add(UI.Hstack(new TextBlock { Text = "Name:  " + le.CnameName, FontFamily = new FontFamily("Cascadia Mono, Consolas"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0), Foreground = UI.Brush("TextFillColorPrimaryBrush") },
+            sp.Children.Add(UI.Hstack(new TextBlock { Text = "Name:  " + le.CnameName, FontFamily = new FontFamily("Cascadia Mono, Consolas"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) }.Fg(),
                 UI.Btn("Kopieren", SymbolRegular.Copy24, () => { UI.Copy(le.CnameName); return Task.CompletedTask; })));
-            sp.Children.Add(UI.Hstack(new TextBlock { Text = "Ziel:   " + le.CnameTarget, FontFamily = new FontFamily("Cascadia Mono, Consolas"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 6, 8, 0), Foreground = UI.Brush("TextFillColorPrimaryBrush") },
+            sp.Children.Add(UI.Hstack(new TextBlock { Text = "Ziel:   " + le.CnameTarget, FontFamily = new FontFamily("Cascadia Mono, Consolas"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 6, 8, 0) }.Fg(),
                 UI.Btn("Kopieren", SymbolRegular.Copy24, () => { UI.Copy(le.CnameTarget); return Task.CompletedTask; })));
             sp.Children.Add(new Border { Height = 10 });
-            sp.Children.Add(UI.Btn("Eintrag ist angelegt – jetzt prüfen", SymbolRegular.Checkmark24, async () => { await App.Api.Call(HttpMethod.Post, "/api/acme/run"); await Reload(); }, ControlAppearance.Primary));
+            sp.Children.Add(UI.Btn("Eintrag ist angelegt – jetzt prüfen", SymbolRegular.Checkmark24, async () => { await App.Api.Call(HttpMethod.Post, "/api/acme/run"); await Reload(); }, ControlAppearance.Primary).AdminOnly());
             Body.Children.Add(CardOf(sp));
         }
         if (le.Running) poll.Start();
@@ -107,14 +107,54 @@ public class CertPage : PageBase
         if (c.HasCa)
             Body.Children.Add(UI.SettingCard(SymbolRegular.ArrowDownload24, "CA-Zertifikat speichern", "Zum Installieren auf Endgeräten, die das Zertifikat prüfen.",
                 UI.Btn("Speichern …", SymbolRegular.Save24, SaveCA)));
-        if (!c.SelfSigned)
+        if (!c.SelfSigned && App.CanWrite)
             Body.Children.Add(UI.SettingCard(SymbolRegular.Shield24, "Wieder das Zertifikat der eigenen CA verwenden", "Geräte mit installierter EasyRadius-CA vertrauen ihm sofort. Let's Encrypt wird ausgeschaltet.",
                 UI.Btn("Verwenden", SymbolRegular.Checkmark24, async () => { await App.Api.Call(HttpMethod.Post, "/api/cert/own"); await UI.Toast("Zertifikat der eigenen CA ist aktiv"); await Reload(); })));
-        Body.Children.Add(UI.SettingCard(SymbolRegular.ArrowSync24, "Komplett neu erzeugen", "Neue Zertifizierungsstelle und neues Serverzertifikat.",
-            UI.Btn("Erzeugen …", SymbolRegular.Add24, async () => { if (await Generate()) await Reload(); })));
-        Body.Children.Add(UI.SettingCard(SymbolRegular.ArrowUpload24, "Eigenes Zertifikat verwenden", "Zertifikat und Schlüssel im PEM-Format, z. B. von deiner Firmen-CA.",
-            UI.Btn("Hochladen …", SymbolRegular.ArrowUpload24, async () => { if (await Upload()) await Reload(); })));
+        if (App.CanWrite)
+        {
+            Body.Children.Add(UI.SettingCard(SymbolRegular.ArrowSync24, "Komplett neu erzeugen", "Neue Zertifizierungsstelle und neues Serverzertifikat.",
+                UI.Btn("Erzeugen …", SymbolRegular.Add24, async () => { if (await Generate()) await Reload(); })));
+            Body.Children.Add(UI.SettingCard(SymbolRegular.ArrowUpload24, "Eigenes Zertifikat verwenden", "Zertifikat und Schlüssel im PEM-Format, z. B. von deiner Firmen-CA.",
+                UI.Btn("Hochladen …", SymbolRegular.ArrowUpload24, async () => { if (await Upload()) await Reload(); })));
+        }
+
+        // Benutzerzertifikate (EAP-TLS)
+        Body.Children.Add(Section("Benutzerzertifikate (EAP-TLS)"));
+        try
+        {
+            var certs = await ApiException.NewFeature(() => App.Api.Get<List<ClientCert>>("/api/clientcerts"));
+            if (certs.Count == 0)
+                Body.Children.Add(new TextBlock { Text = "Noch keine Zertifikate ausgestellt. Unter „Benutzer“ → Rechtsklick → „Zertifikat für EAP-TLS ausstellen“ (EAP-TLS muss in den Einstellungen eingeschaltet sein).", Style = UI.Style("Muted") });
+            else
+            {
+                var table = Table.Create<ClientCert>([
+                    new("Benutzer", nameof(ClientCert.User), 200, nameof(ClientCert.Serial), Bold: true),
+                    new("Status", nameof(ClientCert.StatusText), 110, ColorPath: nameof(ClientCert.StatusColor)),
+                    new("Ausgestellt", nameof(ClientCert.CreatedText), 120),
+                    new("Gültig bis", nameof(ClientCert.NotAfterText), 120),
+                ], null, Table.Writable<ClientCert>(("Sperren", Revoke)));
+                table.ItemsSource = certs.OrderBy(x => x.Revoked).ThenBy(x => x.User, StringComparer.OrdinalIgnoreCase).ToList();
+                table.MaxHeight = 360;
+                Body.Children.Add(CardOf(table, new Thickness(0)));
+                Body.Children.Add(new TextBlock { Text = "Ein gesperrtes Zertifikat wird bei der nächsten Anmeldung abgelehnt (Rechtsklick → „Sperren“).", Style = UI.Style("Muted"), Margin = new Thickness(0, 4, 0, 0) });
+            }
+        }
+        catch (ApiException e) when (e.Status == System.Net.HttpStatusCode.NotFound)
+        {
+            Body.Children.Add(new TextBlock { Text = e.Message, Style = UI.Style("Muted") });
+        }
     }
+
+    async Task Revoke(ClientCert c)
+    {
+        if (c.Revoked) throw new ApiException("Dieses Zertifikat ist bereits gesperrt.");
+        if (!await UI.Confirm("Zertifikat sperren", $"Soll das Zertifikat von „{c.User}“ (Seriennummer {c.Serial}) gesperrt werden? Das Gerät kann sich damit nicht mehr anmelden. Das lässt sich nicht rückgängig machen.", "Sperren")) return;
+        await ApiException.NewFeature(() => App.Api.Call(HttpMethod.Post, $"/api/clientcerts/{Uri.EscapeDataString(c.Serial)}/revoke"));
+        await UI.Toast("Zertifikat gesperrt");
+        await Reload();
+    }
+
+    public static string UrlHost(string ip) => ip.Contains(':') && !ip.StartsWith('[') ? $"[{ip}]" : ip;
 
     public static void Open(string url)
     {
@@ -178,7 +218,7 @@ public class CertPage : PageBase
         var dnsBox = new StackPanel();
         var provCombo = new ComboBox { ItemsSource = provs, HorizontalAlignment = HorizontalAlignment.Stretch, SelectedItem = provs.FirstOrDefault(p => p.Code == le.Provider) };
         var fields = new StackPanel();
-        dnsBox.Children.Add(new TextBlock { Text = "DNS-Anbieter", Margin = new Thickness(0, 12, 0, 6), Foreground = UI.Brush("TextFillColorPrimaryBrush") });
+        dnsBox.Children.Add(new TextBlock { Text = "DNS-Anbieter", Margin = new Thickness(0, 12, 0, 6) }.Fg());
         dnsBox.Children.Add(provCombo);
         dnsBox.Children.Add(new TextBlock { Text = "Dein Anbieter fehlt? Dann den CNAME-Weg wählen – der funktioniert überall.", Style = UI.Style("Muted"), Margin = new Thickness(0, 4, 0, 0) });
         dnsBox.Children.Add(fields);
@@ -192,7 +232,7 @@ public class CertPage : PageBase
             {
                 var box = new PasswordBox { PlaceholderText = p.Code == le.Provider && le.SavedCredentials.Contains(fl.Env) ? "gespeichert – leer lassen zum Behalten" : "" };
                 inputs[fl.Env] = box;
-                fields.Children.Add(new TextBlock { Text = fl.Env, FontFamily = new FontFamily("Cascadia Mono, Consolas"), FontSize = 12, Margin = new Thickness(0, 12, 0, 6), Foreground = UI.Brush("TextFillColorPrimaryBrush") });
+                fields.Children.Add(new TextBlock { Text = fl.Env, FontFamily = new FontFamily("Cascadia Mono, Consolas"), FontSize = 12, Margin = new Thickness(0, 12, 0, 6) }.Fg());
                 fields.Children.Add(box);
                 fields.Children.Add(new TextBlock { Text = fl.Help, Style = UI.Style("Muted"), Margin = new Thickness(0, 4, 0, 0) });
             }
@@ -204,7 +244,7 @@ public class CertPage : PageBase
         var cnameBox = new StackPanel();
         cnameBox.Children.Add(new TextBlock { Text = "Nach dem Speichern zeigt EasyRadius den CNAME-Eintrag an. Die Bestätigung läuft über den Dienst acme-dns – dorthin werden nur Prüfwerte übertragen, keine Zugangsdaten.", Style = UI.Style("Muted"), Margin = new Thickness(0, 8, 0, 0) });
         var acmeDns = new TextBox { Text = le.AcmeDnsUrl, PlaceholderText = le.DefaultAcmeDnsUrl };
-        cnameBox.Children.Add(new TextBlock { Text = "acme-dns-Server (optional, eigener Server)", Margin = new Thickness(0, 12, 0, 6), Foreground = UI.Brush("TextFillColorPrimaryBrush") });
+        cnameBox.Children.Add(new TextBlock { Text = "acme-dns-Server (optional, eigener Server)", Margin = new Thickness(0, 12, 0, 6) }.Fg());
         cnameBox.Children.Add(acmeDns);
         f.Panel.Children.Add(cnameBox);
 
@@ -254,7 +294,7 @@ public class AdPage : PageBase
         Body.Children.Add(UI.SettingCard(SymbolRegular.Building24, mode,
             a.Platform != "windows" ? "EasyRadius läuft unter Linux – Active Directory ist hier per LDAP möglich."
                 : a.Joined ? $"Dieser Rechner ist Mitglied der Domäne {a.Domain}." : "Dieser Rechner ist keiner Domäne beigetreten.",
-            a.Mode != "off" ? UI.Btn("Anmeldung testen", SymbolRegular.Key24, UsersPage.TestLogin) : null));
+            a.Mode != "off" && App.CanWrite ? UI.Btn("Anmeldung testen", SymbolRegular.Key24, UsersPage.TestLogin) : null));
 
         Body.Children.Add(Section("Anbindung"));
         var rOff = new RadioButton { GroupName = "ad", IsChecked = a.Mode == "off", Content = "Aus – nur lokale Benutzer" };
@@ -300,7 +340,7 @@ public class AdPage : PageBase
             });
             await UI.Toast("AD-Einstellungen gespeichert");
             await Reload();
-        }, ControlAppearance.Primary);
+        }, ControlAppearance.Primary).AdminOnly();
         save.HorizontalAlignment = HorizontalAlignment.Right;
         save.Margin = new Thickness(0, 12, 0, 0);
         Body.Children.Add(save);
@@ -319,62 +359,145 @@ public class SettingsPage : PageBase
 {
     public SettingsPage() : base("Einstellungen", "") { }
 
+    static TextBox Num(int value, double width = 110) => new() { Text = value.ToString(), Width = width };
+
     protected override async Task Reload()
     {
         var s = await App.Api.Get<SettingsInfo>("/api/settings");
         var dash = await App.Api.Get<Dashboard>("/api/dashboard");
         Body.Children.Clear();
+        bool rw = App.CanWrite;
 
+        // --- RADIUS ---
         Body.Children.Add(new TextBlock { Text = "RADIUS-Server", Style = UI.Style("SectionTitle"), Margin = new Thickness(0, 0, 0, 8) });
         var name = new TextBox { Text = s.ServerName, Width = 240 };
-        var auth = new TextBox { Text = s.AuthPort.ToString(), Width = 110 };
-        var acct = new TextBox { Text = s.AcctPort.ToString(), Width = 110 };
+        var auth = Num(s.AuthPort);
+        var acct = Num(s.AcctPort);
         Body.Children.Add(UI.SettingCard(SymbolRegular.Router24, "Servername", "Wird den Geräten bei der Anmeldung genannt.", name));
         Body.Children.Add(UI.SettingCard(SymbolRegular.Key24, "Authentifizierungs-Port", "UDP-Port für Anmeldungen. Standard: 1812", auth));
         Body.Children.Add(UI.SettingCard(SymbolRegular.Pulse24, "Accounting-Port", "UDP-Port für Sitzungsdaten. Standard: 1813", acct));
+
+        // --- WLAN-Verfahren ---
+        Body.Children.Add(Section("WLAN-Anmeldeverfahren"));
+        Body.Children.Add(UI.SettingCard(SymbolRegular.Wifi124, "PEAP (MSCHAPv2)", "Immer aktiv – funktioniert mit Benutzername und Passwort auf fast allen Geräten.", null));
+        var ttls = new ToggleSwitch { IsChecked = s.Eap.Ttls };
+        var tls = new ToggleSwitch { IsChecked = s.Eap.Tls };
+        Body.Children.Add(UI.SettingCard(SymbolRegular.LockClosed24, "EAP-TTLS", "Zusätzlich anbieten (innen PAP oder MSCHAPv2) – z. B. für Linux, ältere Android-Geräte oder AD-Konten per LDAP.", ttls));
+        Body.Children.Add(UI.SettingCard(SymbolRegular.Certificate24, "EAP-TLS mit Benutzerzertifikaten",
+            "Anmeldung ohne Passwort mit einem Zertifikat der eigenen CA. Zertifikate stellst du unter „Benutzer“ (Rechtsklick) aus.", tls));
+
+        // --- Sperre ---
+        Body.Children.Add(Section("Schutz vor Passwort-Raten"));
+        var lockOn = new ToggleSwitch { IsChecked = s.Lockout.Enabled };
+        var attempts = Num(s.Lockout.Attempts, 90);
+        var minutes = Num(s.Lockout.Minutes, 90);
+        Body.Children.Add(UI.SettingCard(SymbolRegular.ShieldLock24, "Nach Fehlversuchen sperren",
+            "Gilt je Benutzer und je Endgerät (MAC). Gesperrte findest du unter „Sitzungen“.", lockOn));
+        Body.Children.Add(UI.SettingCard(SymbolRegular.NumberSymbol24, "Fehlversuche", "3 bis 100 innerhalb des Zeitraums", attempts));
+        Body.Children.Add(UI.SettingCard(SymbolRegular.Timer24, "Zeitraum und Sperrdauer (Minuten)", "1 bis 1440", minutes));
+        void LockVis() => attempts.IsEnabled = minutes.IsEnabled = rw && lockOn.IsChecked == true;
+        lockOn.Checked += (_, _) => LockVis();
+        lockOn.Unchecked += (_, _) => LockVis();
+        LockVis();
+
+        // --- Weboberfläche und Protokoll ---
+        Body.Children.Add(Section("Weboberfläche und Protokoll"));
+        var httpsOnly = new ToggleSwitch { IsChecked = s.HttpsOnly, IsEnabled = s.HttpsAddr != "" };
+        Body.Children.Add(UI.SettingCard(SymbolRegular.Globe24, "Nur HTTPS aus dem Netz",
+            s.HttpsAddr == ""
+                ? "HTTPS ist auf dem Server nicht eingeschaltet."
+                : "Andere Rechner erreichen Weboberfläche und Verwaltung nur noch verschlüsselt. Die Einrichtungsseite für Endgeräte bleibt per HTTP erreichbar. Einschalten nur über eine HTTPS-Verbindung oder an diesem Server selbst.",
+            httpsOnly));
+        var retention = Num(s.LogRetention > 0 ? s.LogRetention : 5000);
+        Body.Children.Add(UI.SettingCard(SymbolRegular.TextBulletListLtr24, "Protokoll aufbewahren", "Anzahl der Einträge, die gespeichert bleiben (100 bis 100000).", retention));
+
+        foreach (var c in new Control[] { name, auth, acct, ttls, tls, lockOn, httpsOnly, retention })
+            if (!rw) c.IsEnabled = false;
+        if (!rw) attempts.IsEnabled = minutes.IsEnabled = false;
+
         var save = UI.Btn("Speichern", SymbolRegular.Save24, async () =>
         {
-            if (!int.TryParse(auth.Text, out var ap) || !int.TryParse(acct.Text, out var cp)) throw new ApiException("Ports müssen Zahlen sein");
-            await App.Api.Call(HttpMethod.Put, "/api/settings", new { serverName = name.Text.Trim(), authPort = ap, acctPort = cp });
+            static int Parse(TextBox t, string what) =>
+                int.TryParse(t.Text.Trim(), out var v) ? v : throw new ApiException($"{what}: bitte eine Zahl eintragen");
+            var body = new
+            {
+                serverName = name.Text.Trim(),
+                authPort = Parse(auth, "Authentifizierungs-Port"),
+                acctPort = Parse(acct, "Accounting-Port"),
+                httpsOnly = httpsOnly.IsChecked == true,
+                logRetention = Parse(retention, "Protokoll"),
+                lockout = new { enabled = lockOn.IsChecked == true, attempts = Parse(attempts, "Fehlversuche"), minutes = Parse(minutes, "Sperrdauer") },
+                eap = new { ttls = ttls.IsChecked == true, tls = tls.IsChecked == true },
+            };
+            await App.Api.Call(HttpMethod.Put, "/api/settings", body);
             await UI.Toast("Einstellungen gespeichert");
-        }, ControlAppearance.Primary);
+            await Reload();
+        }, ControlAppearance.Primary).AdminOnly();
         save.HorizontalAlignment = HorizontalAlignment.Right;
-        save.Margin = new Thickness(0, 8, 0, 0);
+        save.Margin = new Thickness(0, 12, 0, 0);
         Body.Children.Add(save);
 
+        // --- Fernzugriff ---
         Body.Children.Add(Section("Fernzugriff"));
-        var port = App.Api.BaseUri.Port;
-        var urls = dash.Ips.Select(ip => $"http://{ip}:{port}").ToList();
+        var urls = new List<string>();
+        if (s.HttpsAddr != "" && App.State.HttpsPort != "")
+            urls.AddRange(dash.Ips.Select(ip => $"https://{CertPage.UrlHost(ip)}:{App.State.HttpsPort}"));
+        if (!s.HttpsOnly || urls.Count == 0)
+            urls.AddRange(dash.Ips.Select(ip => $"{App.Api.BaseUri.Scheme}://{CertPage.UrlHost(ip)}:{App.Api.BaseUri.Port}").Where(u => !urls.Contains(u)));
         Body.Children.Add(UI.SettingCard(SymbolRegular.Globe24, "Weboberfläche im Netzwerk",
             urls.Count > 0 ? "Von jedem Rechner im lokalen Netz erreichbar: " + string.Join(", ", urls) : "Keine Netzwerkadresse gefunden.",
             UI.Hstack(UI.Btn("Im Browser öffnen", SymbolRegular.Open24, () => { CertPage.Open(App.Api.BaseUri.ToString()); return Task.CompletedTask; }),
                       UI.Btn("Kopieren", SymbolRegular.Copy24, () => { UI.Copy(urls.FirstOrDefault() ?? App.Api.BaseUri.ToString()); return Task.CompletedTask; }))));
         Body.Children.Add(UI.SettingCard(SymbolRegular.Desktop24, "Diese App mit einem anderen Server verbinden",
             "Die Verwaltung kann jeden EasyRadius im Netzwerk steuern – beim Anmelden einfach dessen Adresse eintragen.",
-            UI.Btn("Server wechseln", SymbolRegular.ArrowSwap24, () => { App.ShowLogin(); return Task.CompletedTask; })));
+            UI.Btn("Server wechseln", SymbolRegular.ArrowSwap24, () => { App.ShowLogin(autoLogin: false); return Task.CompletedTask; })));
 
+        // --- Konto ---
         Body.Children.Add(Section("Konto"));
-        Body.Children.Add(UI.SettingCard(SymbolRegular.Person24, "Administrator", $"Angemeldet als {s.AdminUser} an {App.Api.BaseUri.Authority}",
+        Body.Children.Add(UI.SettingCard(SymbolRegular.Person24, Fmt.Role(App.State.Role), $"Angemeldet als {s.AdminUser} an {App.Api.BaseUri.Authority}",
             UI.Btn("Passwort ändern", SymbolRegular.Key24, ChangePassword)));
+        if (rw)
+            Body.Children.Add(UI.SettingCard(SymbolRegular.PeopleSettings24, "Konten und API-Tokens", "Weitere Administratoren, Nur-Lese-Konten und Tokens für Skripte.",
+                UI.Btn("Verwalten", SymbolRegular.ChevronRight24, () => { UI.Go(typeof(AccountsPage)); return Task.CompletedTask; })));
         Body.Children.Add(UI.SettingCard(SymbolRegular.SignOut24, "Abmelden", "Gespeichertes Passwort auf diesem PC wird entfernt.",
             UI.Btn("Abmelden", SymbolRegular.SignOut24, async () =>
             {
                 try { await App.Api.Call(HttpMethod.Post, "/api/logout"); } catch { }
                 var saved = SavedLogin.Load(); saved.Password = null; saved.Save();
-                App.ShowLogin();
+                App.ShowLogin(autoLogin: false);
             })));
+        Body.Children.Add(UI.SettingCard(SymbolRegular.PhoneLaptop24, "Überall abmelden", "Beendet alle Sitzungen deines Kontos – in Browsern, auf anderen PCs und hier.",
+            UI.Btn("Überall abmelden", SymbolRegular.SignOut24, async () =>
+            {
+                if (!await UI.Confirm("Überall abmelden", "Alle Sitzungen deines Kontos werden beendet – auch diese. Danach musst du dich neu anmelden.", "Überall abmelden")) return;
+                await App.Api.Call(HttpMethod.Post, "/api/logout-all");
+                App.ShowLogin(autoLogin: false);
+            })));
+
+        // --- Sicherung ---
+        if (rw)
+        {
+            Body.Children.Add(Section("Sicherung"));
+            Body.Children.Add(UI.SettingCard(SymbolRegular.ArrowDownload24, "Sicherung herunterladen",
+                "Komplette Konfiguration mit allen Geheimnissen und Zertifikaten, verschlüsselt mit einem Passwort.",
+                UI.Btn("Herunterladen …", SymbolRegular.Save24, Backup)));
+            Body.Children.Add(UI.SettingCard(SymbolRegular.ArrowUpload24, "Sicherung wiederherstellen",
+                "Ersetzt alles auf diesem Server durch den Stand der Sicherung.",
+                UI.Btn("Wiederherstellen …", SymbolRegular.History24, Restore)));
+        }
 
         Body.Children.Add(Section("Info"));
         var ver = typeof(App).Assembly.GetName().Version;
         Body.Children.Add(UI.SettingCard(SymbolRegular.Info24, "EasyRadius", $"Server-Version {App.State.Version} ({(App.State.Platform == "windows" ? "Windows" : "Linux")}) · Verwaltung {ver?.ToString(3)}", null));
-        Body.Children.Add(UI.SettingCard(SymbolRegular.Wifi124, "Unterstützte Verfahren", "WPA2/WPA3-Enterprise (PEAP-MSCHAPv2), PAP, MS-CHAPv2, VLAN, Check-/Reply-Attribute, Accounting", null));
+        var methods = "WPA2/WPA3-Enterprise (PEAP-MSCHAPv2" + (s.Eap.Ttls ? ", EAP-TTLS" : "") + (s.Eap.Tls ? ", EAP-TLS" : "") + "), PAP, MS-CHAPv2, MAC-Adressen (MAB), VLAN, Check-/Reply-Attribute, Accounting";
+        Body.Children.Add(UI.SettingCard(SymbolRegular.Wifi124, "Unterstützte Verfahren", methods, null));
     }
 
     static async Task ChangePassword()
     {
         var f = new Form();
         var cur = f.Password("Aktuelles Passwort");
-        var n1 = f.Password("Neues Passwort", null, "Mindestens 8 Zeichen.");
+        var n1 = f.Password("Neues Passwort", null, "8 bis 72 Zeichen. Deine anderen Sitzungen werden dabei beendet.");
         var n2 = f.Password("Neues Passwort wiederholen");
         var dlg = new FormDialog("Passwort ändern", f.Panel, "Ändern");
         dlg.OnSave = async () =>
@@ -385,5 +508,58 @@ public class SettingsPage : PageBase
             if (saved.Password != null) { saved.Password = n1.Password; saved.Save(); }
         };
         if (await dlg.ShowAsync() == ContentDialogResult.Primary) await UI.Toast("Passwort geändert");
+    }
+
+    const string BackupFilter = "EasyRadius-Sicherung (*.erbackup)|*.erbackup|Alle Dateien|*.*";
+
+    static async Task Backup()
+    {
+        var f = new Form();
+        f.Note("Die Sicherung enthält die komplette Konfiguration mit allen Passwörtern, Shared Secrets und Zertifikaten. "
+            + "Sie wird mit dem Passwort verschlüsselt – ohne dieses Passwort lässt sie sich nicht wiederherstellen.");
+        var p1 = f.Password("Passwort für die Sicherung", null, "Mindestens 8 Zeichen. Gut aufbewahren!");
+        var p2 = f.Password("Passwort wiederholen");
+        string? saved = null;
+        var dlg = new FormDialog("Sicherung herunterladen", f.Panel, "Speichern unter …");
+        dlg.OnSave = async () =>
+        {
+            if (p1.Password.Length < 8) throw new InvalidOperationException("Das Passwort muss mindestens 8 Zeichen haben.");
+            if (p1.Password != p2.Password) throw new InvalidOperationException("Die Passwörter stimmen nicht überein.");
+            var file = Files.SaveAs($"EasyRadius-Sicherung-{DateTime.Now:yyyy-MM-dd}.erbackup", BackupFilter);
+            if (file == null) throw new KeepOpen();
+            var (data, _) = await ApiException.NewFeature(() => App.Api.Download(HttpMethod.Post, "/api/backup", new { password = p1.Password }));
+            await File.WriteAllBytesAsync(file, data);
+            saved = file;
+        };
+        if (await dlg.ShowAsync() == ContentDialogResult.Primary && saved != null)
+            await UI.Toast($"Sicherung gespeichert: {Path.GetFileName(saved)}");
+    }
+
+    static async Task Restore()
+    {
+        var file = Files.Open("Sicherung wählen", BackupFilter);
+        if (file == null) return;
+        var f = new Form();
+        f.Add("", new InfoBar
+        {
+            Title = "Alles wird ersetzt", Severity = InfoBarSeverity.Warning, IsOpen = true, IsClosable = false,
+            Message = "Benutzer, Gruppen, MAC-Adressen, Geräte, Konten, Einstellungen und Zertifikate dieses Servers werden durch den Stand der Sicherung ersetzt. "
+                + "Alle Anmeldungen an der Verwaltung enden – danach meldest du dich neu an (mit den Konten aus der Sicherung).",
+        });
+        f.Note("Datei: " + Path.GetFileName(file));
+        var pw = f.Password("Passwort der Sicherung");
+        var dlg = new FormDialog("Sicherung wiederherstellen", f.Panel, "Wiederherstellen") { PrimaryButtonAppearance = ControlAppearance.Danger };
+        dlg.OnSave = async () =>
+        {
+            if (pw.Password == "") throw new InvalidOperationException("Bitte das Passwort der Sicherung eingeben.");
+            var content = new MultipartFormDataContent
+            {
+                { new ByteArrayContent(await File.ReadAllBytesAsync(file)), "file", Path.GetFileName(file) },
+                { new StringContent(pw.Password), "password" },
+            };
+            await ApiException.NewFeature(() => App.Api.Call(HttpMethod.Post, "/api/restore", content));
+        };
+        if (await dlg.ShowAsync() != ContentDialogResult.Primary) return;
+        App.ShowLogin("Die Sicherung wurde wiederhergestellt. Bitte neu anmelden.", autoLogin: false, info: true);
     }
 }

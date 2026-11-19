@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-ldap/ldap/v3"
@@ -21,6 +22,51 @@ type LDAP struct {
 	BindUser      string
 	BindPassword  string
 	UserAttribute string
+
+	poolOnce sync.Once
+	pool     chan *ldap.Conn // offene Verbindungen zur Wiederverwendung
+}
+
+// Close schließt die zwischengespeicherten Verbindungen (wenn die Einstellungen wechseln).
+func (l *LDAP) Close() {
+	l.poolOnce.Do(func() { l.pool = make(chan *ldap.Conn, 4) })
+	for {
+		select {
+		case c := <-l.pool:
+			c.Close()
+		default:
+			return
+		}
+	}
+}
+
+// conn liefert eine offene Verbindung aus dem Vorrat oder baut eine neue auf.
+func (l *LDAP) conn() (*ldap.Conn, error) {
+	l.poolOnce.Do(func() { l.pool = make(chan *ldap.Conn, 4) })
+	for {
+		select {
+		case c := <-l.pool:
+			if !c.IsClosing() {
+				return c, nil
+			}
+			c.Close()
+		default:
+			return l.dial()
+		}
+	}
+}
+
+// release gibt eine fehlerfrei benutzte Verbindung zurück in den Vorrat.
+func (l *LDAP) release(c *ldap.Conn, healthy bool) {
+	if !healthy || c.IsClosing() {
+		c.Close()
+		return
+	}
+	select {
+	case l.pool <- c:
+	default:
+		c.Close()
+	}
 }
 
 func (l *LDAP) Describe() string { return "LDAP " + l.URL }
@@ -83,18 +129,22 @@ func (l *LDAP) AuthPAP(username, password string) (*User, error) {
 	if password == "" {
 		return nil, ErrBadCredentials // leeres Passwort = anonymer Bind, nie akzeptieren
 	}
-	c, err := l.dial()
+	c, err := l.conn()
 	if err != nil {
 		return nil, err
 	}
-	defer c.Close()
+	healthy := false
+	defer func() { l.release(c, healthy) }()
 	dn, account, err := l.find(c, username)
 	if err != nil {
+		var de *Error
+		healthy = errors.As(err, &de) && de.BadSecret // „nicht gefunden“ ist kein Verbindungsproblem
 		return nil, err
 	}
 	if err := c.Bind(dn, password); err != nil {
 		var le *ldap.Error
 		if errors.As(err, &le) && le.ResultCode == ldap.LDAPResultInvalidCredentials {
+			healthy = true
 			return nil, ldapReason(le.Err.Error())
 		}
 		return nil, &Error{Msg: "LDAP-Anmeldung fehlgeschlagen: " + err.Error()}
@@ -109,6 +159,7 @@ func (l *LDAP) AuthPAP(username, password string) (*User, error) {
 			for _, e := range res.Entries {
 				u.Groups = append(u.Groups, e.GetAttributeValue("cn"))
 			}
+			healthy = true // Verbindung ist wieder als Dienstkonto angemeldet
 		}
 	}
 	return u, nil

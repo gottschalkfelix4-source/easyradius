@@ -2,11 +2,8 @@
 package web
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
+	"context"
 	"embed"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,20 +11,16 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/gottschalkfelix4-source/easyradius/internal/auth"
 	"github.com/gottschalkfelix4-source/easyradius/internal/certs"
 	"github.com/gottschalkfelix4-source/easyradius/internal/events"
 	"github.com/gottschalkfelix4-source/easyradius/internal/letsencrypt"
 	"github.com/gottschalkfelix4-source/easyradius/internal/radiusd"
 	"github.com/gottschalkfelix4-source/easyradius/internal/store"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
 //go:embed static
@@ -42,13 +35,37 @@ type Server struct {
 	Version string
 
 	failMu sync.Mutex
-	fails  map[string][]time.Time
+	fails  map[string][]time.Time // Fehlversuche je IP
+
+	sessMu   sync.Mutex
+	sessions map[string]*session
+
+	done     chan struct{} // geschlossen beim Beenden (beendet Live-Protokolle)
+	doneOnce sync.Once
 }
 
 const cookieName = "er_session"
 
+// Grenzen für Anfragen.
+const (
+	maxBody       = 1 << 20  // JSON
+	maxUploadBody = 32 << 20 // Sicherung, CSV, Zertifikate
+)
+
+// Öffentliche Pfade, die auch bei „nur HTTPS“ per HTTP erreichbar bleiben
+// (Einrichtungsseite für Handys, CA-Zertifikat).
+var publicHTTP = map[string]bool{
+	"/einrichten": true, "/ca.crt": true, "/onboarding.js": true, "/style.css": true, "/favicon.svg": true,
+}
+
 func (s *Server) Handler() http.Handler {
 	s.fails = map[string][]time.Time{}
+	s.sessions = map[string]*session{}
+	if s.done == nil {
+		s.done = make(chan struct{})
+	}
+	go s.sessionJanitor()
+
 	mux := http.NewServeMux()
 	sub, _ := fs.Sub(staticFS, "static")
 	mux.Handle("GET /", noCache(http.FileServer(http.FS(sub))))
@@ -61,40 +78,89 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/login", s.login)
 	mux.HandleFunc("POST /api/logout", s.logout)
 
-	a := func(pattern string, h http.HandlerFunc) { mux.Handle(pattern, s.requireAuth(h)) }
-	a("GET /api/dashboard", s.dashboard)
-	a("GET /api/users", s.listUsers)
-	a("POST /api/users", s.saveUser)
-	a("PUT /api/users/{id}", s.saveUser)
-	a("DELETE /api/users/{id}", s.deleteUser)
-	a("POST /api/users/test", s.testLogin)
-	a("GET /api/groups", s.listGroups)
-	a("POST /api/groups", s.saveGroup)
-	a("PUT /api/groups/{id}", s.saveGroup)
-	a("DELETE /api/groups/{id}", s.deleteGroup)
-	a("GET /api/ad", s.getAD)
-	a("PUT /api/ad", s.putAD)
-	a("GET /api/acme", s.getACME)
-	a("PUT /api/acme", s.putACME)
-	a("POST /api/acme/run", s.runACME)
-	a("GET /api/acme/providers", s.acmeProviders)
-	a("GET /api/attributes", s.attributeDictionary)
-	a("POST /api/cert/own", s.certOwnCA)
-	a("GET /api/qr.png", s.qrPNG)
-	a("GET /api/clients", s.listClients)
-	a("POST /api/clients", s.saveClient)
-	a("PUT /api/clients/{id}", s.saveClient)
-	a("DELETE /api/clients/{id}", s.deleteClient)
-	a("GET /api/events", s.listEvents)
-	a("GET /api/events/stream", s.streamEvents)
-	a("GET /api/settings", s.getSettings)
-	a("PUT /api/settings", s.putSettings)
-	a("POST /api/admin/password", s.changePassword)
-	a("GET /api/cert", s.certInfo)
-	a("POST /api/cert/generate", s.certGenerate)
-	a("POST /api/cert/upload", s.certUpload)
-	a("GET /api/cert/ca.crt", s.certDownload)
-	return securityHeaders(mux)
+	// view: alle angemeldeten Konten (auch „nur lesen“); admin: nur Administratoren.
+	view := func(pattern string, h http.HandlerFunc) { mux.Handle(pattern, s.requireRole(store.RoleViewer, h)) }
+	admin := func(pattern string, h http.HandlerFunc) { mux.Handle(pattern, s.requireRole(store.RoleAdmin, h)) }
+
+	view("GET /api/dashboard", s.dashboard)
+	view("GET /api/me", s.me)
+	view("POST /api/admin/password", s.changePassword) // eigenes Passwort
+	view("POST /api/logout-all", s.logoutAll)
+
+	view("GET /api/users", s.listUsers)
+	admin("POST /api/users", s.saveUser)
+	admin("PUT /api/users/{id}", s.saveUser)
+	admin("DELETE /api/users/{id}", s.deleteUser)
+	admin("POST /api/users/test", s.testLogin)
+	view("GET /api/users.csv", s.exportUsersCSV)
+	admin("POST /api/users/import", s.importUsersCSV)
+
+	view("GET /api/groups", s.listGroups)
+	admin("POST /api/groups", s.saveGroup)
+	admin("PUT /api/groups/{id}", s.saveGroup)
+	admin("DELETE /api/groups/{id}", s.deleteGroup)
+
+	view("GET /api/macs", s.listMACs)
+	admin("POST /api/macs", s.saveMAC)
+	admin("PUT /api/macs/{id}", s.saveMAC)
+	admin("DELETE /api/macs/{id}", s.deleteMAC)
+	view("GET /api/macs.csv", s.exportMACsCSV)
+	admin("POST /api/macs/import", s.importMACsCSV)
+
+	view("GET /api/clients", s.listClients)
+	admin("GET /api/clients/{id}/secret", s.clientSecret)
+	admin("POST /api/clients", s.saveClient)
+	admin("PUT /api/clients/{id}", s.saveClient)
+	admin("DELETE /api/clients/{id}", s.deleteClient)
+
+	view("GET /api/online", s.listOnline)
+	admin("POST /api/online/disconnect", s.disconnect)
+	view("GET /api/accounting", s.listAccounting)
+	view("GET /api/accounting.csv", s.exportAccountingCSV)
+	view("GET /api/lockouts", s.listLockouts)
+	admin("POST /api/lockouts/unlock", s.unlock)
+
+	view("GET /api/ad", s.getAD)
+	admin("PUT /api/ad", s.putAD)
+	view("GET /api/acme", s.getACME)
+	admin("PUT /api/acme", s.putACME)
+	admin("POST /api/acme/run", s.runACME)
+	view("GET /api/acme/providers", s.acmeProviders)
+	view("GET /api/attributes", s.attributeDictionary)
+	view("GET /api/qr.png", s.qrPNG)
+
+	view("GET /api/events", s.listEvents)
+	view("GET /api/events/stream", s.streamEvents)
+	view("GET /api/settings", s.getSettings)
+	admin("PUT /api/settings", s.putSettings)
+
+	view("GET /api/cert", s.certInfo)
+	admin("POST /api/cert/generate", s.certGenerate)
+	admin("POST /api/cert/upload", s.certUpload)
+	admin("POST /api/cert/own", s.certOwnCA)
+	view("GET /api/cert/ca.crt", s.certDownload)
+	s.clientCertRoutes(view, admin)
+
+	admin("GET /api/admins", s.listAdmins)
+	admin("POST /api/admins", s.saveAdmin)
+	admin("PUT /api/admins/{id}", s.saveAdmin)
+	admin("DELETE /api/admins/{id}", s.deleteAdmin)
+	admin("GET /api/tokens", s.listTokens)
+	admin("POST /api/tokens", s.createToken)
+	admin("DELETE /api/tokens/{id}", s.deleteToken)
+
+	admin("POST /api/backup", s.backup)
+	admin("POST /api/restore", s.restore)
+
+	return s.securityHeaders(mux)
+}
+
+// Close beendet laufende Live-Verbindungen (vor dem Herunterfahren).
+func (s *Server) Close() {
+	if s.done == nil {
+		return
+	}
+	s.doneOnce.Do(func() { close(s.done) })
 }
 
 // ---- Hilfsfunktionen ----
@@ -109,8 +175,10 @@ func fail(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
 
+func ok(w http.ResponseWriter) { writeJSON(w, 200, map[string]bool{"ok": true}) }
+
 func readJSON(r *http.Request, v any) error {
-	return json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(v)
+	return json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(v)
 }
 
 func noCache(h http.Handler) http.Handler {
@@ -120,121 +188,70 @@ func noCache(h http.Handler) http.Handler {
 	})
 }
 
-func securityHeaders(h http.Handler) http.Handler {
+func isLoopback(r *http.Request) bool {
+	ip := net.ParseIP(clientIP(r))
+	return ip != nil && ip.IsLoopback()
+}
+
+// httpsURL baut die HTTPS-Adresse für eine Weiterleitung.
+func (s *Server) httpsURL(r *http.Request) string {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	port := httpsPort(s.Store.Settings().HTTPSAddr)
+	if port != "443" {
+		host += ":" + port
+	}
+	return "https://" + host + r.URL.RequestURI()
+}
+
+func httpsPort(addr string) string {
+	if i := strings.LastIndex(addr, ":"); i >= 0 {
+		return addr[i+1:]
+	}
+	return "8443"
+}
+
+func (s *Server) securityHeaders(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
-		// Schutz vor CSRF: schreibende API-Aufrufe brauchen unseren Header.
-		if strings.HasPrefix(r.URL.Path, "/api/") && r.Method != http.MethodGet && r.Header.Get("X-EasyRadius") != "1" {
-			fail(w, http.StatusForbidden, "Ungültige Anfrage")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'")
+		if r.TLS != nil {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		}
+
+		// Aus dem Netz nur HTTPS (falls eingestellt) – die Einrichtungsseite bleibt erreichbar.
+		cfg := s.Store.Settings()
+		if r.TLS == nil && cfg.HTTPSOnly && cfg.HTTPSAddr != "" && !isLoopback(r) && !publicHTTP[r.URL.Path] {
+			if r.Method == http.MethodGet && !strings.HasPrefix(r.URL.Path, "/api/") {
+				http.Redirect(w, r, s.httpsURL(r), http.StatusTemporaryRedirect)
+				return
+			}
+			fail(w, http.StatusForbidden, "Bitte die Weboberfläche per HTTPS öffnen: "+s.httpsURL(&http.Request{Host: r.Host, URL: r.URL}))
 			return
+		}
+
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			limit := int64(maxBody)
+			if strings.HasSuffix(r.URL.Path, "/import") || r.URL.Path == "/api/restore" || r.URL.Path == "/api/cert/upload" {
+				limit = maxUploadBody
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+			// Schutz vor CSRF: schreibende Aufrufe mit Cookie brauchen unseren Header.
+			// API-Tokens (Authorization: Bearer) senden keine Cookies und sind ausgenommen.
+			if r.Method != http.MethodGet && r.Header.Get("X-EasyRadius") != "1" && !hasBearer(r) {
+				fail(w, http.StatusForbidden, "Ungültige Anfrage")
+				return
+			}
 		}
 		h.ServeHTTP(w, r)
 	})
-}
-
-// ---- Sitzung ----
-
-func (s *Server) sign(payload string) string {
-	m := hmac.New(sha256.New, []byte(s.Store.Settings().SessionKey))
-	m.Write([]byte(payload))
-	return payload + "|" + base64.RawURLEncoding.EncodeToString(m.Sum(nil))
-}
-
-func (s *Server) sessionUser(r *http.Request) string {
-	c, err := r.Cookie(cookieName)
-	if err != nil {
-		return ""
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(c.Value)
-	if err != nil {
-		return ""
-	}
-	parts := strings.Split(string(raw), "|")
-	if len(parts) != 3 {
-		return ""
-	}
-	if !hmac.Equal([]byte(s.sign(parts[0]+"|"+parts[1])), raw) {
-		return ""
-	}
-	exp, _ := strconv.ParseInt(parts[1], 10, 64)
-	if time.Now().Unix() > exp {
-		return ""
-	}
-	cfg := s.Store.Settings()
-	if parts[0] != cfg.AdminUser {
-		return ""
-	}
-	return parts[0]
-}
-
-func (s *Server) setSession(w http.ResponseWriter, user string) {
-	exp := time.Now().Add(12 * time.Hour)
-	val := base64.RawURLEncoding.EncodeToString([]byte(s.sign(user + "|" + strconv.FormatInt(exp.Unix(), 10))))
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: val, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Expires: exp})
-}
-
-func (s *Server) requireAuth(h http.HandlerFunc) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.sessionUser(r) == "" {
-			fail(w, http.StatusUnauthorized, "Bitte anmelden")
-			return
-		}
-		h(w, r)
-	})
-}
-
-func (s *Server) state(w http.ResponseWriter, r *http.Request) {
-	cfg := s.Store.Settings()
-	writeJSON(w, 200, map[string]any{
-		"setup":    cfg.AdminHash == "",
-		"user":     s.sessionUser(r),
-		"version":  s.Version,
-		"platform": runtime.GOOS,
-		"server":   cfg.ServerName,
-	})
-}
-
-func validPassword(pw string) error {
-	if len(pw) < 8 {
-		return errors.New("Das Passwort muss mindestens 8 Zeichen lang sein")
-	}
-	return nil
-}
-
-func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
-	var in struct{ Username, Password string }
-	if readJSON(r, &in) != nil {
-		fail(w, 400, "Ungültige Eingabe")
-		return
-	}
-	in.Username = strings.TrimSpace(in.Username)
-	if in.Username == "" {
-		fail(w, 400, "Benutzername fehlt")
-		return
-	}
-	if err := validPassword(in.Password); err != nil {
-		fail(w, 400, err.Error())
-		return
-	}
-	hash, _ := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
-	var already bool
-	s.Store.UpdateSettings(func(c *store.Settings) {
-		if c.AdminHash != "" {
-			already = true
-			return
-		}
-		c.AdminUser, c.AdminHash = in.Username, string(hash)
-	})
-	if already {
-		fail(w, 409, "Die Einrichtung ist bereits abgeschlossen")
-		return
-	}
-	s.Log.Add(events.Event{Kind: events.Info, Message: "Administrator „" + in.Username + "“ eingerichtet"})
-	s.setSession(w, in.Username)
-	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
 func clientIP(r *http.Request) string {
@@ -245,71 +262,39 @@ func clientIP(r *http.Request) string {
 	return h
 }
 
-func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
-	s.failMu.Lock()
-	recent := s.fails[ip][:0]
-	for _, t := range s.fails[ip] {
-		if time.Since(t) < 10*time.Minute {
-			recent = append(recent, t)
-		}
+// audit schreibt eine Änderung ins Protokoll – mit Konto und Herkunft.
+func (s *Server) audit(r *http.Request, msg string) {
+	p := principalOf(r)
+	who := p.name
+	if p.token != "" {
+		who = "Token „" + p.token + "“"
 	}
-	s.fails[ip] = recent
-	blocked := len(recent) >= 8
-	s.failMu.Unlock()
-	if blocked {
-		fail(w, 429, "Zu viele Fehlversuche – bitte 10 Minuten warten")
-		return
-	}
-	var in struct{ Username, Password string }
-	if readJSON(r, &in) != nil {
-		fail(w, 400, "Ungültige Eingabe")
-		return
-	}
-	cfg := s.Store.Settings()
-	if cfg.AdminHash == "" || !strings.EqualFold(in.Username, cfg.AdminUser) ||
-		bcrypt.CompareHashAndPassword([]byte(cfg.AdminHash), []byte(in.Password)) != nil {
-		s.failMu.Lock()
-		s.fails[ip] = append(s.fails[ip], time.Now())
-		s.failMu.Unlock()
-		time.Sleep(700 * time.Millisecond)
-		s.Log.Add(events.Event{Kind: events.Warning, ClientIP: ip, Message: "Fehlgeschlagene Anmeldung an der Weboberfläche"})
-		fail(w, 401, "Benutzername oder Passwort falsch")
-		return
-	}
-	s.setSession(w, cfg.AdminUser)
-	writeJSON(w, 200, map[string]bool{"ok": true})
+	s.Log.Add(events.Event{Kind: events.Audit, Admin: who, ClientIP: clientIP(r), Message: msg})
 }
 
-func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
-	writeJSON(w, 200, map[string]bool{"ok": true})
-}
+// ---- Status für die Startseite ----
 
-func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
-	var in struct{ Current, New string }
-	if readJSON(r, &in) != nil {
-		fail(w, 400, "Ungültige Eingabe")
-		return
-	}
+func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 	cfg := s.Store.Settings()
-	if bcrypt.CompareHashAndPassword([]byte(cfg.AdminHash), []byte(in.Current)) != nil {
-		fail(w, 400, "Das aktuelle Passwort stimmt nicht")
-		return
-	}
-	if err := validPassword(in.New); err != nil {
-		fail(w, 400, err.Error())
-		return
-	}
-	hash, _ := bcrypt.GenerateFromPassword([]byte(in.New), bcrypt.DefaultCost)
-	s.Store.UpdateSettings(func(c *store.Settings) { c.AdminHash = string(hash) })
-	writeJSON(w, 200, map[string]bool{"ok": true})
+	p := s.authenticate(r)
+	writeJSON(w, 200, map[string]any{
+		"setup":     s.Store.NeedsSetup(),
+		"user":      p.name,
+		"role":      p.role,
+		"version":   s.Version,
+		"platform":  platform(),
+		"server":    cfg.ServerName,
+		"secure":    r.TLS != nil,
+		"loopback":  isLoopback(r),
+		"httpsPort": httpsPort(cfg.HTTPSAddr),
+		"httpsOn":   cfg.HTTPSAddr != "",
+	})
 }
 
 // ---- Übersicht ----
 
 func localIPs() []string {
-	var out []string
+	out := []string{}
 	ifaces, _ := net.Interfaces()
 	for _, i := range ifaces {
 		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
@@ -342,108 +327,15 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		"activeUsers": active,
 		"clients":     len(s.Store.Clients()),
 		"groups":      len(s.Store.Groups()),
+		"macs":        len(s.Store.MACs()),
 		"adMode":      s.Store.Settings().AD.Mode,
 		"stats":       s.Log.Stats(time.Now()),
 		"online":      s.Radius.Online(),
 		"unknown":     s.Radius.UnknownClients(),
+		"lockouts":    len(s.Radius.Lockouts()),
 		"recent":      s.Log.Recent(8),
 		"cert":        s.Certs.Info(),
 	})
-}
-
-// ---- Benutzer ----
-
-type userOut struct {
-	store.User
-	NTHash  string `json:"ntHash,omitempty"`
-	Expired bool   `json:"expired"`
-}
-
-func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
-	out := []userOut{}
-	for _, u := range s.Store.Users() {
-		out = append(out, userOut{User: u, Expired: u.Expired(time.Now())})
-	}
-	writeJSON(w, 200, out)
-}
-
-func (s *Server) saveUser(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		store.User
-		Password string `json:"password"`
-	}
-	if readJSON(r, &in) != nil {
-		fail(w, 400, "Ungültige Eingabe")
-		return
-	}
-	u := in.User
-	u.ID = r.PathValue("id")
-	u.NTHash = ""
-	if in.Password != "" {
-		u.NTHash = hex.EncodeToString(auth.NTHash(in.Password))
-	}
-	if u.VLAN != "" {
-		if n, err := strconv.Atoi(u.VLAN); err != nil || n < 1 || n > 4094 {
-			fail(w, 400, "VLAN muss eine Zahl zwischen 1 und 4094 sein")
-			return
-		}
-	}
-	if u.ExpiresAt != "" {
-		if _, err := time.Parse("2006-01-02", u.ExpiresAt); err != nil {
-			fail(w, 400, "Ablaufdatum ungültig")
-			return
-		}
-	}
-	if u.GroupID != "" {
-		if _, ok := s.Store.Group(u.GroupID); !ok {
-			fail(w, 400, "Gruppe nicht gefunden")
-			return
-		}
-	}
-	saved, err := s.Store.SaveUser(u)
-	if err != nil {
-		fail(w, 400, err.Error())
-		return
-	}
-	saved.NTHash = ""
-	writeJSON(w, 200, saved)
-}
-
-func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
-	if err := s.Store.DeleteUser(r.PathValue("id")); err != nil {
-		fail(w, 404, err.Error())
-		return
-	}
-	writeJSON(w, 200, map[string]bool{"ok": true})
-}
-
-// ---- Geräte ----
-
-func (s *Server) listClients(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, s.Store.Clients())
-}
-
-func (s *Server) saveClient(w http.ResponseWriter, r *http.Request) {
-	var c store.Client
-	if readJSON(r, &c) != nil {
-		fail(w, 400, "Ungültige Eingabe")
-		return
-	}
-	c.ID = r.PathValue("id")
-	saved, err := s.Store.SaveClient(c)
-	if err != nil {
-		fail(w, 400, err.Error())
-		return
-	}
-	writeJSON(w, 200, saved)
-}
-
-func (s *Server) deleteClient(w http.ResponseWriter, r *http.Request) {
-	if err := s.Store.DeleteClient(r.PathValue("id")); err != nil {
-		fail(w, 404, err.Error())
-		return
-	}
-	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
 // ---- Protokoll ----
@@ -462,6 +354,8 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "Streaming nicht möglich")
 		return
 	}
+	// Das Live-Protokoll darf länger laufen als die normale Schreib-Zeitgrenze.
+	http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	ch := s.Log.Subscribe()
@@ -470,10 +364,18 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	defer ping.Stop()
 	fmt.Fprint(w, ": ok\n\n")
 	fl.Flush()
+	sessionCheck := time.NewTicker(time.Minute)
+	defer sessionCheck.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-s.done:
+			return
+		case <-sessionCheck.C:
+			if s.authenticate(r).name == "" { // abgemeldet oder Passwort geändert
+				return
+			}
 		case e := <-ch:
 			b, _ := json.Marshal(e)
 			fmt.Fprintf(w, "data: %s\n\n", b)
@@ -490,8 +392,9 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	c := s.Store.Settings()
 	writeJSON(w, 200, map[string]any{
-		"authPort": c.AuthPort, "acctPort": c.AcctPort, "webAddr": c.WebAddr,
-		"serverName": c.ServerName, "adminUser": c.AdminUser,
+		"authPort": c.AuthPort, "acctPort": c.AcctPort, "webAddr": c.WebAddr, "httpsAddr": c.HTTPSAddr,
+		"httpsOnly": c.HTTPSOnly, "serverName": c.ServerName, "adminUser": principalOf(r).name,
+		"logRetention": c.LogRetention, "lockout": c.Lockout, "eap": c.EAP,
 	})
 }
 
@@ -499,6 +402,10 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		AuthPort, AcctPort int
 		ServerName         string
+		HTTPSOnly          *bool
+		LogRetention       *int
+		Lockout            *store.LockoutSettings
+		EAP                *store.EAPSettings
 	}
 	if readJSON(r, &in) != nil {
 		fail(w, 400, "Ungültige Eingabe")
@@ -512,17 +419,56 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	if in.ServerName == "" {
 		in.ServerName = "EasyRadius"
 	}
+	if len(in.ServerName) > 64 {
+		fail(w, 400, "Servername zu lang (max. 64 Zeichen)")
+		return
+	}
+	if in.Lockout != nil && in.Lockout.Enabled && (in.Lockout.Attempts < 3 || in.Lockout.Attempts > 100 || in.Lockout.Minutes < 1 || in.Lockout.Minutes > 1440) {
+		fail(w, 400, "Sperre: 3–100 Fehlversuche und 1–1440 Minuten")
+		return
+	}
+	if in.LogRetention != nil && (*in.LogRetention < 100 || *in.LogRetention > 100000) {
+		fail(w, 400, "Protokoll: 100 bis 100000 Einträge")
+		return
+	}
+	if in.HTTPSOnly != nil && *in.HTTPSOnly && r.TLS == nil && !isLoopback(r) {
+		fail(w, 400, "„Nur HTTPS“ bitte über eine HTTPS-Verbindung einschalten – sonst sperrst du dich womöglich aus")
+		return
+	}
 	old := s.Store.Settings()
-	s.Store.UpdateSettings(func(c *store.Settings) {
+	apply := func(c *store.Settings) {
 		c.AuthPort, c.AcctPort, c.ServerName = in.AuthPort, in.AcctPort, in.ServerName
-	})
+		if in.HTTPSOnly != nil {
+			c.HTTPSOnly = *in.HTTPSOnly
+		}
+		if in.LogRetention != nil {
+			c.LogRetention = *in.LogRetention
+		}
+		if in.Lockout != nil {
+			c.Lockout = *in.Lockout
+		}
+		if in.EAP != nil {
+			c.EAP = *in.EAP
+		}
+	}
+	if err := s.Store.UpdateSettings(apply); err != nil {
+		fail(w, 500, err.Error())
+		return
+	}
 	if old.AuthPort != in.AuthPort || old.AcctPort != in.AcctPort {
 		if err := s.Radius.Restart(); err != nil {
-			fail(w, 400, err.Error())
+			// Neue Ports gehen nicht – alte wiederherstellen, damit RADIUS weiterläuft.
+			s.Store.UpdateSettings(func(c *store.Settings) { c.AuthPort, c.AcctPort = old.AuthPort, old.AcctPort })
+			s.Radius.Restart()
+			fail(w, 400, err.Error()+" – die bisherigen Ports bleiben aktiv")
 			return
 		}
 	}
-	writeJSON(w, 200, map[string]bool{"ok": true})
+	if in.LogRetention != nil {
+		s.Log.SetMax(*in.LogRetention)
+	}
+	s.audit(r, "Einstellungen geändert")
+	ok(w)
 }
 
 // ---- Zertifikat ----
@@ -538,12 +484,13 @@ func (s *Server) certGenerate(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, err.Error())
 		return
 	}
-	s.Log.Add(events.Event{Kind: events.Info, Message: "Neues Zertifikat erzeugt"})
+	s.Store.UpdateSettings(func(c *store.Settings) { c.ACME.Enabled = false })
+	s.audit(r, "Neue Zertifizierungsstelle und neues Zertifikat erzeugt")
 	writeJSON(w, 200, s.Certs.Info())
 }
 
 func (s *Server) certUpload(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(1 << 20); err != nil {
+	if err := r.ParseMultipartForm(4 << 20); err != nil {
 		fail(w, 400, "Upload fehlgeschlagen")
 		return
 	}
@@ -565,7 +512,8 @@ func (s *Server) certUpload(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, err.Error())
 		return
 	}
-	s.Log.Add(events.Event{Kind: events.Info, Message: "Eigenes Zertifikat importiert"})
+	s.Store.UpdateSettings(func(c *store.Settings) { c.ACME.Enabled = false })
+	s.audit(r, "Eigenes Zertifikat importiert")
 	writeJSON(w, 200, s.Certs.Info())
 }
 
@@ -578,4 +526,22 @@ func (s *Server) certDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-x509-ca-cert")
 	w.Header().Set("Content-Disposition", `attachment; filename="EasyRadius-CA.crt"`)
 	w.Write(b)
+}
+
+// Shutdown hilft main beim geordneten Beenden mehrerer HTTP-Server.
+func Shutdown(ctx context.Context, servers ...*http.Server) {
+	var wg sync.WaitGroup
+	for _, hs := range servers {
+		if hs == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(hs *http.Server) {
+			defer wg.Done()
+			if err := hs.Shutdown(ctx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+				hs.Close()
+			}
+		}(hs)
+	}
+	wg.Wait()
 }

@@ -33,8 +33,10 @@ die Weboberfläche. Beide können dasselbe. Alles ist auf Deutsch.
 
 ## Funktionen
 
-- **WLAN-Enterprise** mit PEAP-MSCHAPv2 – funktioniert mit Windows, Android, iOS, macOS und Linux
+- **WLAN-Enterprise** mit PEAP-MSCHAPv2 – funktioniert mit Windows, Android, iOS, macOS und Linux;
+  zusätzlich EAP-TTLS (PAP oder MS-CHAPv2) und auf Wunsch EAP-TLS mit Benutzerzertifikaten
 - **Switch-, Router- und VPN-Logins** per PAP oder MS-CHAPv2
+- **MAC-Adressen** für Drucker, Telefone und Kameras ohne 802.1X (MAC Authentication Bypass)
 - **Gruppen** mit VLAN, Sperre, Ablaufdatum und Beschränkung auf bestimmte WLANs (SSID) oder Geräte
 - **Check- und Reply-Attribute** pro Benutzer und Gruppe, nach dem Vorbild von TekRADIUS – inklusive
   Herstellerattributen (Zyxel, Cisco, MikroTik, Aruba, Fortinet, Juniper, WISPr) und eigener VSAs
@@ -42,8 +44,14 @@ die Weboberfläche. Beide können dasselbe. Alles ist auf Deutsch.
 - **Zertifikate**: eigene CA wird automatisch erzeugt; alternativ Let's Encrypt für die eigene Domain
   (49 DNS-Anbieter per API, jeder andere per einmaligem CNAME-Eintrag oder über Port 80)
 - **Einrichtungsseite für Endgeräte** mit QR-Code – das Handy zeigt die passenden Schritte für sein System
-- **Live-Protokoll** mit verständlichen Gründen, warum eine Anmeldung abgelehnt wurde
-- **Accounting**: wer gerade verbunden ist
+- **Live-Protokoll** mit verständlichen Gründen, warum eine Anmeldung abgelehnt wurde, und einem
+  Änderungsprotokoll: wer hat wann was umgestellt
+- **Accounting**: wer gerade verbunden ist, abgeschlossene Sitzungen pro Monat (auch als CSV), Trennen
+  einer Sitzung per Disconnect-Request (RFC 5176)
+- **Sperre nach Fehlversuchen** pro Benutzer und pro Endgerät
+- **Mehrere Administratoren** mit den Rollen *Administrator* und *Nur lesen*, dazu API-Tokens für Skripte
+- **Sicherung** der kompletten Konfiguration samt Zertifikaten als verschlüsselte Datei; Benutzer und
+  MAC-Adressen als CSV importieren und exportieren
 - **Windows-App** (WPF, Fluent-Design, Mica) und **Weboberfläche** mit gleichem Funktionsumfang; die App
   kann auch einen EasyRadius auf einem anderen Rechner verwalten
 - Läuft als **Windows-Dienst** oder unter **Linux** (systemd) – als **Proxmox-LXC** mit einem Befehl eingerichtet
@@ -66,9 +74,10 @@ die Weboberfläche. Beide können dasselbe. Alles ist auf Deutsch.
 4. Unter **Benutzer** die ersten Konten anlegen.
 
 Der Installer richtet den Dienst *EasyRadius RADIUS-Server* ein (Autostart, Neustart bei Absturz) sowie
-Firewall-Regeln für UDP 1812/1813, TCP 8088 (Weboberfläche, nur in privaten und Domänen-Netzwerken) und
-TCP 80 (nur für die Let's-Encrypt-Prüfung). Im Startmenü stehen „EasyRadius“ (Windows-App) und
-„EasyRadius Weboberfläche“.
+Firewall-Regeln für UDP 1812/1813 und TCP 8088/8443 (Weboberfläche). Die Regeln gelten nur für
+`EasyRadius.exe` und nur in privaten und Domänen-Netzwerken. Wer Let's Encrypt über Port 80 nutzt, gibt
+TCP 80 selbst frei. Im Startmenü stehen „EasyRadius“ (Windows-App) und „EasyRadius Weboberfläche“.
+Meldungen des Dienstes erscheinen auch in der Windows-Ereignisanzeige (Quelle *EasyRadius*).
 
 Das Installationspaket ist rund 70 MB groß, weil die Windows-App ihre .NET-Laufzeit mitbringt – auf dem
 Rechner muss nichts zusätzlich installiert sein.
@@ -127,7 +136,9 @@ curl -fsSL https://raw.githubusercontent.com/gottschalkfelix4-source/easyradius/
 
 Installiert nach `/usr/local/bin`, legt den Dienst `easyradius` an (eigener Systembenutzer, abgesichert) und
 speichert die Daten in `/var/lib/easyradius`. Ein erneuter Aufruf – oder `easyradius-update` – aktualisiert.
-Optionen: `--version 1.6.0`, `--file paket.tar.gz` (ohne Internet), `--uninstall` (Daten bleiben),
+Vor jedem Update sichert das Skript die Daten nach `/var/lib/easyradius.bak-<Zeitpunkt>.tar.gz` (die drei
+neuesten bleiben). Startet die neue Version nicht, kommt automatisch die alte zurück.
+Optionen: `--version 1.7.0`, `--file paket.tar.gz` (ohne Internet), `--uninstall` (Daten bleiben),
 `--uninstall --purge`. Pakete gibt es für amd64 und arm64.
 
 ## Windows-App und Weboberfläche
@@ -137,9 +148,26 @@ lässt sich aber auch die Adresse eines anderen EasyRadius eintragen – die App
 Verwaltungskonsole von einem Arbeitsplatz aus. Das Passwort kann sie, mit Windows verschlüsselt, für den
 angemeldeten Windows-Benutzer speichern.
 
-Die **Weboberfläche** unter `http://<server>:8088` ist für alles andere da: ein Rechner ohne App, ein Mac,
+Die **Weboberfläche** unter `https://<server>:8443` ist für alles andere da: ein Rechner ohne App, ein Mac,
 ein Tablet – und der Normalfall, wenn EasyRadius in einem Proxmox-Container läuft (die Windows-App kann ihn
 ebenso verwalten). Unter *Einstellungen → Fernzugriff* zeigt die App, unter welchen Adressen sie erreichbar ist.
+
+HTTPS nutzt dasselbe Zertifikat wie RADIUS. Mit der eigenen CA warnt der Browser beim ersten Aufruf; mit
+Let's Encrypt nicht. Die Windows-App zeigt beim ersten Verbinden den Fingerabdruck an und merkt ihn sich –
+ändert sich das Zertifikat später unerwartet, verweigert sie die Verbindung. `http://<server>:8088` bleibt
+erreichbar; in den Einstellungen lässt sich HTTP aus dem Netz abschalten (vom Server selbst und für die
+Einrichtungsseite der Handys bleibt es offen).
+
+Konten gibt es mit zwei Rollen: **Administrator** darf alles, **Nur lesen** sieht alles außer Shared Secrets
+und kann nichts ändern. Für Skripte gibt es **API-Tokens** (*Konten → API-Tokens*):
+
+```bash
+curl -H "Authorization: Bearer er_…" https://radius.firma.local:8443/api/users
+```
+
+Unter *Einstellungen → Sicherung* lädt man die komplette Konfiguration samt Zertifikaten als
+`.erbackup`-Datei herunter. Sie ist mit einem eigenen Passwort verschlüsselt und lässt sich auf einem
+anderen Rechner wiederherstellen – auch zwischen Windows und Linux.
 
 | | |
 |---|---|
@@ -154,14 +182,37 @@ ebenso verwalten). Unter *Einstellungen → Fernzugriff* zeigt die App, unter we
 | RADIUS-Server | IP-Adresse des Windows-Rechners |
 | Port | 1812, Accounting 1813 |
 | Shared Secret | wie in EasyRadius beim Gerät hinterlegt |
+| Message-Authenticator | einschalten, falls das Gerät die Option hat |
+| CoA / Dynamic Authorization | optional, Port 3799 – nötig für „Sitzung trennen“ |
 
 Kommt eine Anfrage von einem Gerät, das noch nicht freigegeben ist, zeigt die Übersicht das an – mit einem
 Knopf zum Freigeben.
 
+Neue Geräte verlangen den Message-Authenticator in jeder Anfrage. Das schützt vor dem Blast-RADIUS-Angriff
+(CVE-2024-3596). Ältere Switches, die ihn bei PAP nicht mitschicken, werden dann abgewiesen – das Protokoll
+sagt das deutlich. Dann am Gerät die Option suchen oder in EasyRadius beim Gerät den Haken
+„Message-Authenticator verlangen“ entfernen. Geräte aus Versionen vor 1.7 behalten das bisherige Verhalten.
+
+## MAC-Adressen (MAB)
+
+Drucker, Telefone oder Kameras können oft kein 802.1X. Der Switch schickt dann ihre MAC-Adresse als
+Benutzername. Unter **MAC-Adressen** werden solche Geräte eingetragen, mit Gruppe, VLAN und Attributen wie
+bei Benutzern. Die Schreibweise ist egal (`AA:BB:…`, `aabb.cc…`, `AA-BB-…`). Am Switch heißt die Funktion
+meist *MAC Authentication*, *MAB* oder *MAC-based authentication*.
+
+MAB ist kein Schutz gegen jemanden, der eine MAC-Adresse fälscht – solche Geräte gehören in ein eigenes
+VLAN mit wenig Rechten.
+
 ## Endgeräte verbinden
 
 Methode **PEAP**, Phase 2 **MSCHAPv2**, Benutzername und Passwort. Windows, iOS und macOS fragen beim ersten
-Verbinden, ob sie dem Zertifikat vertrauen sollen.
+Verbinden, ob sie dem Zertifikat vertrauen sollen. **EAP-TTLS** mit PAP oder MSCHAPv2 geht ebenfalls (in den
+Einstellungen abschaltbar) – manche Linux- und Android-Profile wählen das von sich aus.
+
+**EAP-TLS** (ohne Passwort, mit Zertifikat pro Benutzer) wird in den Einstellungen eingeschaltet. Beim
+Benutzer stellt man dann ein Zertifikat aus und bekommt eine passwortgeschützte `.p12`-Datei für das Gerät.
+Das funktioniert nur mit der eigenen CA, nicht mit Let's Encrypt. Gesperrte Zertifikate werden sofort
+abgelehnt.
 
 **Android 11 und neuer** verlangt eine Zertifikatsprüfung. Zwei Möglichkeiten:
 
@@ -197,14 +248,16 @@ Privilegstufe bitte mit dem Handbuch des jeweiligen Modells abgleichen.
 
 ## Active Directory
 
-| Modus | Voraussetzung | WLAN (PEAP) | Switch/VPN (PAP) |
+| Modus | Voraussetzung | WLAN | Switch/VPN (PAP) |
 |---|---|---|---|
-| Domänenmitglied (nur Windows) | Der Rechner ist der Domäne beigetreten | ja | ja |
-| LDAP | Dienstkonto mit Leserechten | nein | ja |
+| Domänenmitglied (nur Windows) | Der Rechner ist der Domäne beigetreten | ja (PEAP, TTLS) | ja |
+| LDAP | Dienstkonto mit Leserechten | nur EAP-TTLS mit PAP | ja |
 
 Im Domänenmodus prüft der Domänencontroller das Passwort, so wie bei NPS – EasyRadius sieht keine
-Passwörter. AD-Gruppen (auch verschachtelte) werden mit EasyRadius-Gruppen verknüpft. Per LDAP ist WLAN
-nicht möglich, weil MS-CHAPv2 ohne Domänenbeitritt nicht gegen das AD geprüft werden kann.
+Passwörter. AD-Gruppen (auch verschachtelte) werden mit EasyRadius-Gruppen verknüpft. Per LDAP geht WLAN
+nur mit EAP-TTLS und PAP innen, weil MS-CHAPv2 ohne Domänenbeitritt nicht gegen das AD geprüft werden kann.
+Das Passwort läuft dabei verschlüsselt im TLS-Tunnel zum Server; die Geräte müssen das Serverzertifikat
+prüfen, sonst kann ein falscher Access Point Passwörter abgreifen.
 
 Lokale Benutzer haben Vorrang vor gleichnamigen AD-Konten. Mit **Anmeldung testen** lässt sich prüfen,
 welche Quelle, Gruppe und welches VLAN ein Konto bekommt und ob WLAN funktionieren würde.
@@ -227,17 +280,25 @@ Der RADIUS-Server selbst muss bei den DNS-Wegen nicht aus dem Internet erreichba
 
 - Daten liegen unter Windows in `C:\ProgramData\EasyRadius` (nur SYSTEM und Administratoren), unter Linux in
   `/var/lib/easyradius` (nur der Dienstbenutzer). Bei der Deinstallation bleiben sie erhalten.
-- Passwörter werden als NT-Hash gespeichert, weil MS-CHAPv2 ihn braucht. Das Admin-Passwort der
-  Oberfläche als bcrypt-Hash.
-- EAP-Anfragen ohne gültigen Message-Authenticator werden verworfen; alle Antworten tragen einen.
-- Die Weboberfläche (und damit auch die Verbindung der Windows-App) läuft über HTTP. Für Zugriff über
-  unsichere Netze einen Reverse-Proxy mit HTTPS davorschalten; die App kann sich auch mit `https://…`
-  verbinden.
+- Shared Secrets, Passwort-Hashes und Zugangsdaten stehen verschlüsselt in der `config.json`. Der Schlüssel
+  liegt in `secret.key` daneben, unter Windows zusätzlich per DPAPI an den Rechner gebunden. Wer den
+  Datenordner auf einen anderen Rechner umziehen will, nimmt die Sicherung aus der Oberfläche.
+- Gespeichert wird atomar mit Rückfallkopie (`config.json.bak`).
+- Passwörter werden als NT-Hash gespeichert, weil MS-CHAPv2 ihn braucht. Die Passwörter der Oberfläche als
+  bcrypt-Hash.
+- Abgelehnte Geräte bekommen nur „Anmeldung abgelehnt“ zurück; den genauen Grund zeigt das Protokoll.
+- Alle Antworten tragen einen Message-Authenticator an erster Stelle; EAP-Anfragen ohne gültigen werden
+  verworfen.
+- Nach zehn Fehlversuchen in 15 Minuten wird der Benutzer bzw. das Endgerät für 15 Minuten gesperrt
+  (einstellbar). Aktive Sperren stehen unter **Sitzungen** und lassen sich dort aufheben.
+- Sitzungen der Oberfläche enden nach zwei Stunden ohne Aktivität, spätestens nach zwölf. Ein neues Passwort
+  meldet alle anderen Sitzungen des Kontos ab.
 
 ## Grenzen
 
-- Kein CHAP (Passwörter liegen nicht im Klartext vor), kein EAP-TLS und kein EAP-TTLS.
-- Unter Linux gibt es Active Directory nur per LDAP (also ohne WLAN mit AD-Passwörtern).
+- Kein CHAP (Passwörter liegen nicht im Klartext vor).
+- MSI und App sind nicht signiert; Windows SmartScreen fragt deshalb beim ersten Start nach.
+- Unter Linux gibt es Active Directory nur per LDAP – WLAN mit AD-Passwörtern dann nur über EAP-TTLS/PAP.
 - Die AD-Anbindung im Domänenmodus ist bisher nur mit einem simulierten Verzeichnis automatisiert getestet,
   der Let's-Encrypt-Abruf noch nicht mit jedem DNS-Anbieter. Erfahrungsberichte aus echten Umgebungen sind
   willkommen – gerne als Issue.
@@ -249,11 +310,11 @@ Voraussetzungen: Go 1.27 oder neuer und das .NET 8 SDK (für die Windows-App und
 Tool geladen wird).
 
 ```powershell
-.\build.ps1 -Version 1.6.0
+.\build.ps1 -Version 1.7.0
 ```
 
 Ergebnis in `build\`: `EasyRadius.exe` (Dienst), `manager\EasyRadiusManager.exe` (Windows-App),
-`EasyRadius-1.6.0.msi`, `radtest.exe` und die Linux-Pakete `easyradius-1.6.0-linux-amd64.tar.gz` / `-arm64`.
+`EasyRadius-1.7.0.msi`, `radtest.exe` und die Linux-Pakete `easyradius-1.7.0-linux-amd64.tar.gz` / `-arm64`.
 Zum Ausprobieren ohne Installation:
 
 ```powershell

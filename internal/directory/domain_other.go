@@ -1,8 +1,8 @@
-//go:build !windows
+//go:build !windows || !(amd64 || arm64)
 
 package directory
 
-// Domänenmodus (Prüfung über LSA/Netlogon) gibt es nur unter Windows.
+// Domänenmodus (Prüfung über LSA/Netlogon) gibt es nur unter Windows (64 Bit).
 // Unter Linux steht für Active Directory der LDAP-Modus zur Verfügung.
 
 type Domain struct{ NetBIOS string }

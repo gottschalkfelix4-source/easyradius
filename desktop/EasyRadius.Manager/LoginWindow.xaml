@@ -4,7 +4,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
     Title="EasyRadius"
-    Width="440" Height="580"
+    Width="440" SizeToContent="Height"
     ResizeMode="NoResize"
     WindowStartupLocation="CenterScreen"
     ExtendsContentIntoTitleBar="True"
@@ -16,36 +16,42 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
         <ui:TitleBar Title="EasyRadius" ShowMaximize="False" ShowMinimize="False" />
-        <StackPanel Grid.Row="1" Margin="40,8,40,32" VerticalAlignment="Center">
-            <Border Width="56" Height="56" CornerRadius="12" Background="#2563EB" HorizontalAlignment="Center">
-                <ui:SymbolIcon Symbol="Wifi124" FontSize="32" Foreground="White" />
-            </Border>
-            <TextBlock Text="EasyRadius" FontSize="26" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,12,0,0"
-                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-            <TextBlock x:Name="Lead" Text="Verwaltung deines RADIUS-Servers" HorizontalAlignment="Center" Margin="0,4,0,20"
-                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextAlignment="Center" TextWrapping="Wrap" />
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="40,8,40,32">
+                <Border Width="56" Height="56" CornerRadius="12" Background="#2563EB" HorizontalAlignment="Center">
+                    <ui:SymbolIcon Symbol="Wifi124" FontSize="32" Foreground="White" />
+                </Border>
+                <TextBlock Text="EasyRadius" FontSize="26" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,12,0,0"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                <TextBlock x:Name="Lead" Text="Verwaltung deines RADIUS-Servers" HorizontalAlignment="Center" Margin="0,4,0,20"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextAlignment="Center" TextWrapping="Wrap" />
 
-            <ui:InfoBar x:Name="Error" Severity="Error" IsClosable="False" Margin="0,0,0,8" />
+                <ui:InfoBar x:Name="Error" Severity="Error" IsClosable="False" Margin="0,0,0,8" />
 
-            <TextBlock Text="Server" Margin="0,0,0,6" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-            <ui:TextBox x:Name="Server" PlaceholderText="localhost:8088 oder radius.firma.local:8088" />
-            <TextBlock Text="Dieser Rechner oder ein EasyRadius im Netzwerk." Style="{StaticResource Muted}" Margin="0,4,0,0" />
+                <TextBlock x:Name="ServerLabel" Text="Server" Margin="0,0,0,6" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                <ui:TextBox x:Name="Server" PlaceholderText="localhost oder radius.firma.local"
+                            AutomationProperties.LabeledBy="{Binding ElementName=ServerLabel}"
+                            AutomationProperties.HelpText="Dieser Rechner oder ein EasyRadius im Netzwerk" />
+                <TextBlock Text="Dieser Rechner oder ein EasyRadius im Netzwerk." Style="{StaticResource Muted}" Margin="0,4,0,0" />
+                <ui:InfoBar x:Name="Insecure" Severity="Warning" IsClosable="False" Margin="0,8,0,0"
+                            Title="Unverschlüsselte Verbindung" />
 
-            <TextBlock Text="Benutzername" Margin="0,14,0,6" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-            <ui:TextBox x:Name="User" />
+                <TextBlock x:Name="UserLabel" Text="Benutzername" Margin="0,14,0,6" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                <ui:TextBox x:Name="User" AutomationProperties.LabeledBy="{Binding ElementName=UserLabel}" />
 
-            <TextBlock Text="Passwort" Margin="0,14,0,6" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-            <ui:PasswordBox x:Name="Pass" />
+                <TextBlock x:Name="PassLabel" Text="Passwort" Margin="0,14,0,6" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                <ui:PasswordBox x:Name="Pass" AutomationProperties.LabeledBy="{Binding ElementName=PassLabel}" />
 
-            <StackPanel x:Name="RepeatBox" Visibility="Collapsed">
-                <TextBlock Text="Passwort wiederholen" Margin="0,14,0,6" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                <ui:PasswordBox x:Name="Pass2" />
+                <StackPanel x:Name="RepeatBox" Visibility="Collapsed">
+                    <TextBlock x:Name="Pass2Label" Text="Passwort wiederholen" Margin="0,14,0,6" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                    <ui:PasswordBox x:Name="Pass2" AutomationProperties.LabeledBy="{Binding ElementName=Pass2Label}" />
+                </StackPanel>
+
+                <CheckBox x:Name="Remember" Content="Passwort auf diesem PC merken" Margin="0,14,0,0" />
+
+                <ui:Button x:Name="Go" Content="Anmelden" Appearance="Primary" HorizontalAlignment="Stretch" Margin="0,20,0,0"
+                           Click="OnLogin" IsDefault="True" />
             </StackPanel>
-
-            <CheckBox x:Name="Remember" Content="Passwort auf diesem PC merken" Margin="0,14,0,0" />
-
-            <ui:Button x:Name="Go" Content="Anmelden" Appearance="Primary" HorizontalAlignment="Stretch" Margin="0,20,0,0"
-                       Click="OnLogin" IsDefault="True" />
-        </StackPanel>
+        </ScrollViewer>
     </Grid>
 </ui:FluentWindow>

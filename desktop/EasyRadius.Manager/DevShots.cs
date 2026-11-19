@@ -39,7 +39,7 @@ public static class DevShots
         Directory.CreateDirectory(dir);
         if (Environment.GetEnvironmentVariable("EASYRADIUS_THEME") is "dark" or "light")
             ApplicationThemeManager.Apply(Environment.GetEnvironmentVariable("EASYRADIUS_THEME") == "dark" ? ApplicationTheme.Dark : ApplicationTheme.Light, Wpf.Ui.Controls.WindowBackdropType.Mica, true);
-        var login = new LoginWindow(null);
+        var login = new LoginWindow(null, autoLogin: false);
         Application.Current.MainWindow = login;
         login.Show();
         await Task.Delay(1500);
@@ -56,8 +56,9 @@ public static class DevShots
         var pages = new (string file, Type page)[]
         {
             ("uebersicht", typeof(DashboardPage)), ("benutzer", typeof(UsersPage)), ("gruppen", typeof(GroupsPage)),
-            ("geraete", typeof(ClientsPage)), ("protokoll", typeof(LogPage)), ("zertifikat", typeof(CertPage)),
-            ("ad", typeof(AdPage)), ("einstellungen", typeof(SettingsPage)),
+            ("mac-adressen", typeof(MacsPage)), ("geraete", typeof(ClientsPage)), ("sitzungen", typeof(SessionsPage)),
+            ("protokoll", typeof(LogPage)), ("zertifikat", typeof(CertPage)), ("ad", typeof(AdPage)),
+            ("konten", typeof(AccountsPage)), ("einstellungen", typeof(SettingsPage)),
         };
         foreach (var (file, page) in pages)
         {
@@ -79,7 +80,9 @@ public static class DevShots
         // Schreibvorgänge über die App-Modelle prüfen.
         var log = new List<string>();
         var gs = await api.Get<List<Group>>("/api/groups");
-        var gg = gs.First(x => x.Name == "Gäste");
+        var gg = gs.FirstOrDefault(x => x.Name == "Gäste");
+        var demo = await api.Get<List<User>>("/api/users");
+        if (gg == null || !demo.Any(x => x.Username == "lena.koch")) { Application.Current.Shutdown(); return; } // andere Demodaten: nur Screenshots
         gg.Enabled = false;
         await api.Call(HttpMethod.Put, "/api/groups/" + gg.Id, gg);
         var after = (await api.Get<List<Group>>("/api/groups")).First(x => x.Id == gg.Id);

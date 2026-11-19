@@ -6,9 +6,11 @@ require (
 	github.com/go-acme/lego/v4 v4.35.2
 	github.com/go-ldap/ldap/v3 v3.4.15
 	golang.org/x/crypto v0.59.0
+	golang.org/x/net v0.62.0
 	golang.org/x/sys v0.50.0
 	layeh.com/radius v0.0.0-20231213012653-1006025d24f8
 	rsc.io/qr v0.2.0
+	software.sslmate.com/src/go-pkcs12 v0.7.4
 )
 
 require (
@@ -57,7 +59,6 @@ require (
 	github.com/transip/gotransip/v6 v6.26.2 // indirect
 	github.com/vultr/govultr/v3 v3.31.0 // indirect
 	golang.org/x/mod v0.42.0 // indirect
-	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.25.0 // indirect
 	golang.org/x/text v0.44.0 // indirect

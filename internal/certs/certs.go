@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/idna"
 )
 
 const (
@@ -149,7 +151,7 @@ func (m *Manager) Generate(name string) error {
 	srvTmpl := &x509.Certificate{
 		SerialNumber: serial(),
 		Subject:      pkix.Name{CommonName: name, Organization: []string{"EasyRadius"}},
-		DNSNames:     []string{name},
+		DNSNames:     dnsNames(name),
 		NotBefore:    now,
 		// Apple-Geräte akzeptieren Serverzertifikate mit max. ~825 Tagen Laufzeit.
 		NotAfter:    now.AddDate(0, 0, 820),
@@ -169,12 +171,52 @@ func (m *Manager) Generate(name string) error {
 		serverCertFile: append(pemBlock("CERTIFICATE", srvDER), pemBlock("CERTIFICATE", caDER)...),
 		serverKeyFile:  pemBlock("PRIVATE KEY", srvKeyDER),
 	}
+	if err := m.writeFiles(files); err != nil {
+		return err
+	}
+	return m.load()
+}
+
+// writeFiles schreibt mehrere Dateien möglichst atomar: erst alle als .tmp,
+// dann umbenennen. Ein Fehler beim Schreiben lässt die alten Dateien unberührt.
+func (m *Manager) writeFiles(files map[string][]byte) error {
 	for f, b := range files {
-		if err := os.WriteFile(m.path(f), b, 0o600); err != nil {
+		if err := os.WriteFile(m.path(f)+".tmp", b, 0o600); err != nil {
+			for g := range files {
+				os.Remove(m.path(g) + ".tmp")
+			}
 			return err
 		}
 	}
-	return m.load()
+	m.mu.Lock() // kein load() zwischen den Umbenennungen
+	defer m.mu.Unlock()
+	for f := range files {
+		if err := os.Rename(m.path(f)+".tmp", m.path(f)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// dnsNames macht aus dem Servernamen einen gültigen DNS-Namen für das Zertifikat
+// ("Radius Büro" → "radius-xn--bro-hoa"). Der Anzeigename bleibt im CN erhalten.
+func dnsNames(name string) []string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	n = strings.Map(func(r rune) rune {
+		switch {
+		case r == ' ' || r == '_':
+			return '-'
+		case r < 0x80 && !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '.'):
+			return -1
+		}
+		return r
+	}, n)
+	n = strings.Trim(n, "-.")
+	a, err := idna.Lookup.ToASCII(n)
+	if err != nil || a == "" || len(a) > 253 {
+		return nil
+	}
+	return []string{a}
 }
 
 // Import übernimmt ein eigenes Zertifikat (PEM, ggf. mit Kette) und Schlüssel.
@@ -183,16 +225,75 @@ func (m *Manager) Import(certPEM, keyPEM []byte) error {
 	if err != nil {
 		return fmt.Errorf("Zertifikat und Schlüssel passen nicht zusammen: %w", err)
 	}
-	if _, err := x509.ParseCertificate(c.Certificate[0]); err != nil {
+	leaf, err := x509.ParseCertificate(c.Certificate[0])
+	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(m.path(serverCertFile), certPEM, 0o600); err != nil {
-		return err
-	}
-	if err := os.WriteFile(m.path(serverKeyFile), keyPEM, 0o600); err != nil {
+	if err := checkServerCert(leaf); err != nil {
 		return err
 	}
 	// Die eigene CA bleibt erhalten, damit man jederzeit zurückwechseln kann.
+	if err := m.writeFiles(map[string][]byte{serverCertFile: certPEM, serverKeyFile: keyPEM}); err != nil {
+		return err
+	}
+	return m.load()
+}
+
+// checkServerCert prüft, ob sich ein Zertifikat als RADIUS-/Webserverzertifikat eignet.
+func checkServerCert(leaf *x509.Certificate) error {
+	now := time.Now()
+	switch {
+	case leaf.IsCA:
+		return errors.New("Das ist ein CA-Zertifikat – bitte das Serverzertifikat auswählen")
+	case now.After(leaf.NotAfter):
+		return fmt.Errorf("Das Zertifikat ist am %s abgelaufen", leaf.NotAfter.Local().Format("02.01.2006"))
+	case leaf.NotBefore.After(now.Add(24 * time.Hour)):
+		return fmt.Errorf("Das Zertifikat ist erst ab %s gültig", leaf.NotBefore.Local().Format("02.01.2006"))
+	}
+	if len(leaf.ExtKeyUsage) > 0 {
+		ok := false
+		for _, u := range leaf.ExtKeyUsage {
+			if u == x509.ExtKeyUsageServerAuth || u == x509.ExtKeyUsageAny {
+				ok = true
+			}
+		}
+		if !ok {
+			return errors.New("Dem Zertifikat fehlt der Verwendungszweck „Serverauthentifizierung“ – WLAN-Geräte lehnen es ab")
+		}
+	}
+	return nil
+}
+
+// Files liefert alle Zertifikatsdateien (für die Sicherung).
+func (m *Manager) Files() map[string][]byte {
+	out := map[string][]byte{}
+	entries, _ := os.ReadDir(m.dir)
+	for _, e := range entries {
+		if e.IsDir() || strings.HasSuffix(e.Name(), ".tmp") {
+			continue
+		}
+		if b, err := os.ReadFile(m.path(e.Name())); err == nil {
+			out[e.Name()] = b
+		}
+	}
+	return out
+}
+
+// Restore ersetzt die Zertifikatsdateien (aus einer Sicherung).
+func (m *Manager) Restore(files map[string][]byte) error {
+	clean := map[string][]byte{}
+	for name, b := range files {
+		if name != filepath.Base(name) || strings.HasPrefix(name, ".") {
+			return errors.New("ungültiger Dateiname in der Sicherung")
+		}
+		clean[name] = b
+	}
+	if _, err := tls.X509KeyPair(clean[serverCertFile], clean[serverKeyFile]); err != nil {
+		return errors.New("Die Sicherung enthält kein gültiges Serverzertifikat")
+	}
+	if err := m.writeFiles(clean); err != nil {
+		return err
+	}
 	return m.load()
 }
 
@@ -268,7 +369,7 @@ func (m *Manager) UseOwnCA(name string) error {
 	tmpl := &x509.Certificate{
 		SerialNumber: serial(),
 		Subject:      pkix.Name{CommonName: name, Organization: []string{"EasyRadius"}},
-		DNSNames:     []string{name},
+		DNSNames:     dnsNames(name),
 		NotBefore:    now,
 		NotAfter:     now.AddDate(0, 0, 820),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
@@ -279,10 +380,10 @@ func (m *Manager) UseOwnCA(name string) error {
 		return err
 	}
 	kd, _ := x509.MarshalPKCS8PrivateKey(srvKey)
-	if err := os.WriteFile(m.path(serverCertFile), append(pemBlock("CERTIFICATE", der), caPEM...), 0o600); err != nil {
-		return err
-	}
-	if err := os.WriteFile(m.path(serverKeyFile), pemBlock("PRIVATE KEY", kd), 0o600); err != nil {
+	if err := m.writeFiles(map[string][]byte{
+		serverCertFile: append(pemBlock("CERTIFICATE", der), caPEM...),
+		serverKeyFile:  pemBlock("PRIVATE KEY", kd),
+	}); err != nil {
 		return err
 	}
 	return m.load()

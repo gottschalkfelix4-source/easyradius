@@ -11,8 +11,10 @@ import (
 
 // secureDir beschränkt das Datenverzeichnis auf SYSTEM und Administratoren,
 // denn dort liegen Shared Secrets und Passwort-Hashes.
+// Besitzer wird die Gruppe Administratoren – ein Konto, das den Ordner vorher
+// angelegt hat, behält so keine Sonderrechte (Besitzer dürfen Rechte ändern).
 func secureDir(path string) error {
-	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+	sd, err := windows.SecurityDescriptorFromString("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
 	if err != nil {
 		return err
 	}
@@ -20,8 +22,18 @@ func secureDir(path string) error {
 	if err != nil {
 		return err
 	}
-	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return err
+	}
+	err = windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		owner, nil, dacl, nil)
+	if err != nil { // ohne Recht zum Besitzwechsel wenigstens die Zugriffsrechte setzen
+		err = windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+	}
+	return err
 }
 
 // openBrowser öffnet die Weboberfläche als eigenes App-Fenster (Microsoft Edge im

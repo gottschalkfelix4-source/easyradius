@@ -50,21 +50,30 @@ func SplitName(username string) (user, domain string, upn bool) {
 	return username, "", false
 }
 
-// GroupMatches vergleicht AD-Gruppennamen tolerant: "FIRMA\WLAN-Mitarbeiter",
-// "WLAN-Mitarbeiter" und "CN=WLAN-Mitarbeiter,OU=..." gelten als gleich.
-func GroupMatches(adGroup, configured string) bool {
-	norm := func(s string) string {
-		s = strings.TrimSpace(s)
-		if strings.HasPrefix(strings.ToUpper(s), "CN=") {
-			s = s[3:]
-			if i := strings.Index(s, ","); i >= 0 {
-				s = s[:i]
-			}
+// splitGroup zerlegt "FIRMA\Gruppe" bzw. "CN=Gruppe,OU=..." in Domäne und Namen.
+func splitGroup(s string) (domain, name string) {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(strings.ToUpper(s), "CN=") {
+		s = s[3:]
+		if i := strings.Index(s, ","); i >= 0 {
+			s = s[:i]
 		}
-		if i := strings.LastIndex(s, `\`); i >= 0 {
-			s = s[i+1:]
-		}
-		return strings.ToLower(s)
+		return "", s
 	}
-	return norm(adGroup) == norm(configured)
+	if i := strings.LastIndex(s, `\`); i >= 0 {
+		return s[:i], s[i+1:]
+	}
+	return "", s
+}
+
+// GroupMatches vergleicht AD-Gruppennamen: "WLAN-Mitarbeiter" und
+// "CN=WLAN-Mitarbeiter,OU=..." passen zu jeder Domäne, "FIRMA\WLAN-Mitarbeiter"
+// nur zur Domäne FIRMA – eine gleichnamige Gruppe einer vertrauten Domäne zählt dann nicht.
+func GroupMatches(adGroup, configured string) bool {
+	ad, an := splitGroup(adGroup)
+	cd, cn := splitGroup(configured)
+	if !strings.EqualFold(an, cn) {
+		return false
+	}
+	return cd == "" || ad == "" || strings.EqualFold(ad, cd)
 }

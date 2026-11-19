@@ -27,6 +27,12 @@ public abstract class PageBase : Page
 
         var root = new StackPanel { MaxWidth = 1200 };
         root.Children.Add(head);
+        if (!App.CanWrite)
+            root.Children.Add(new InfoBar
+            {
+                Title = "Nur-Lese-Zugang", Message = "Mit diesem Konto kannst du alles ansehen, aber nichts ändern.",
+                Severity = InfoBarSeverity.Informational, IsOpen = true, IsClosable = false, Margin = new Thickness(0, 16, 0, -8),
+            });
         root.Children.Add(Body);
         Content = new ScrollViewer { Content = root, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Padding = new Thickness(0, 0, 16, 0) };
         Loaded += async (_, _) => await SafeReload();
@@ -44,7 +50,7 @@ public abstract class PageBase : Page
     public async Task SafeReload()
     {
         try { await Reload(); }
-        catch (ApiException e) { await UI.Toast(e.Message, true); }
+        catch (Exception e) when (UI.IsExpected(e)) { UI.ReportError(e); }
     }
 
     protected static FrameworkElement Section(string text) => new TextBlock { Text = text, Style = UI.Style("SectionTitle") };

@@ -14,7 +14,7 @@ import (
 )
 
 // keyLog fängt das TLS-Master-Secret ab (Format NSS-Keylog, "CLIENT_RANDOM ...").
-// Go stellt es sonst nicht bereit; für PEAP brauchen wir es zur Schlüsselableitung
+// Go stellt es sonst nicht bereit; für PEAP/EAP-TTLS/EAP-TLS brauchen wir es zur Schlüsselableitung
 // auch bei Clients ohne "Extended Master Secret".
 type keyLog struct {
 	mu           sync.Mutex
@@ -48,7 +48,13 @@ func helloRandom(rec []byte, msgType byte) ([]byte, error) {
 }
 
 // deriveMSK berechnet MSK/EMSK nach RFC 5216: PRF(master, "client EAP encryption", client_random || server_random).
-func (s *peapSession) deriveMSK(tc *tls.Conn) ([]byte, error) {
+func (s *tunnelSession) deriveMSK(tc *tls.Conn) ([]byte, error) {
+	return s.exportKey(tc, "client EAP encryption", 128)
+}
+
+// exportKey berechnet PRF(master, label, client_random || server_random) mit n Byte
+// (RFC 5216 für PEAP/EAP-TLS, RFC 5281 für EAP-TTLS).
+func (s *tunnelSession) exportKey(tc *tls.Conn, label string, n int) ([]byte, error) {
 	cr, err := helloRandom(s.conn.firstIn, 1)
 	if err != nil {
 		return nil, err
@@ -67,7 +73,7 @@ func (s *peapSession) deriveMSK(tc *tls.Conn) ([]byte, error) {
 	if strings.HasSuffix(tls.CipherSuiteName(tc.ConnectionState().CipherSuite), "SHA384") {
 		h = sha512.New384
 	}
-	return prf12(h, master, []byte("client EAP encryption"), append(append([]byte{}, cr...), sr...), 128), nil
+	return prf12(h, master, []byte(label), append(append([]byte{}, cr...), sr...), n), nil
 }
 
 // prf12 ist die TLS-1.2-PRF (RFC 5246 Abschnitt 5).

@@ -225,3 +225,5 @@ layeh.com/radius v0.0.0-20231213012653-1006025d24f8 h1:orYXpi6BJZdvgytfHH4ybOe4w
 layeh.com/radius v0.0.0-20231213012653-1006025d24f8/go.mod h1:QRf+8aRqXc019kHkpcs/CTgyWXFzf+bxlsyuo2nAl1o=
 rsc.io/qr v0.2.0 h1:6vBLea5/NRMVTz8V66gipeLycZMl/+UlFmk8DvqQ6WY=
 rsc.io/qr v0.2.0/go.mod h1:IF+uZjkb9fqyeF/4tlBoynqmQxUoPfWEKh921coOuXs=
+software.sslmate.com/src/go-pkcs12 v0.7.4 h1:OvJ7g/OB9RuVAOzahlFLns6HeIcP+SJotsDqmLfhd8w=
+software.sslmate.com/src/go-pkcs12 v0.7.4/go.mod h1:Qiz0EyvDRJjjxGyUQa2cCNZn/wMyzrRJ/qcDXOQazLI=

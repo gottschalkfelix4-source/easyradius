@@ -18,6 +18,7 @@ const (
 	Info    Kind = "info"
 	Warning Kind = "warning"
 	Acct    Kind = "acct"
+	Audit   Kind = "audit" // Änderungen durch Administratoren
 )
 
 type Event struct {
@@ -28,6 +29,7 @@ type Event struct {
 	ClientIP string    `json:"clientIp,omitempty"`
 	Station  string    `json:"station,omitempty"` // MAC des Endgeräts
 	Method   string    `json:"method,omitempty"`
+	Admin    string    `json:"admin,omitempty"` // bei Audit: wer
 	Message  string    `json:"message"`
 }
 
@@ -36,43 +38,79 @@ type Log struct {
 	items []Event
 	max   int
 	file  *os.File
+	path  string
+	lines int // Zeilen in der Datei seit dem letzten Verdichten
 	subs  map[chan Event]struct{}
 }
 
 func Open(dir string, max int) (*Log, error) {
-	l := &Log{max: max, subs: map[chan Event]struct{}{}}
-	path := filepath.Join(dir, "events.jsonl")
-	if f, err := os.Open(path); err == nil {
+	if max < 100 {
+		max = 100
+	}
+	l := &Log{max: max, subs: map[chan Event]struct{}{}, path: filepath.Join(dir, "events.jsonl")}
+	if f, err := os.Open(l.path); err == nil {
 		sc := bufio.NewScanner(f)
 		sc.Buffer(make([]byte, 64*1024), 1024*1024)
 		for sc.Scan() {
 			var e Event
 			if json.Unmarshal(sc.Bytes(), &e) == nil {
 				l.items = append(l.items, e)
+				if len(l.items) > 2*max { // nie mehr als nötig im Speicher halten
+					l.items = append([]Event(nil), l.items[len(l.items)-max:]...)
+				}
 			}
 		}
 		f.Close()
 		if len(l.items) > max {
 			l.items = l.items[len(l.items)-max:]
 		}
-		// Datei kompakt neu schreiben, damit sie nicht endlos wächst.
-		if tmp, err := os.Create(path + ".tmp"); err == nil {
-			w := bufio.NewWriter(tmp)
-			enc := json.NewEncoder(w)
-			for i := range l.items {
-				enc.Encode(&l.items[i])
-			}
-			w.Flush()
-			tmp.Close()
-			os.Rename(path+".tmp", path)
-		}
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.compactLocked(); err != nil {
 		return nil, err
 	}
-	l.file = f
 	return l, nil
+}
+
+// compactLocked schreibt die Datei mit den behaltenen Einträgen neu,
+// damit sie auch im Dauerbetrieb nicht endlos wächst.
+func (l *Log) compactLocked() error {
+	if l.file != nil {
+		l.file.Close()
+		l.file = nil
+	}
+	if tmp, err := os.OpenFile(l.path+".tmp", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600); err == nil {
+		w := bufio.NewWriter(tmp)
+		enc := json.NewEncoder(w)
+		for i := range l.items {
+			enc.Encode(&l.items[i])
+		}
+		w.Flush()
+		tmp.Sync()
+		tmp.Close()
+		os.Rename(l.path+".tmp", l.path)
+	}
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	l.file, l.lines = f, len(l.items)
+	return nil
+}
+
+// SetMax ändert, wie viele Einträge behalten werden.
+func (l *Log) SetMax(max int) {
+	if max < 100 {
+		max = 100
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.max = max
+	if len(l.items) > max {
+		l.items = append([]Event(nil), l.items[len(l.items)-max:]...)
+		l.compactLocked()
+	}
 }
 
 func (l *Log) Add(e Event) {
@@ -88,6 +126,10 @@ func (l *Log) Add(e Event) {
 	if l.file != nil {
 		b, _ := json.Marshal(&e)
 		l.file.Write(append(b, '\n'))
+		l.lines++
+		if l.lines > 2*l.max {
+			l.compactLocked()
+		}
 	}
 	for ch := range l.subs {
 		select {

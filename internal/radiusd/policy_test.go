@@ -58,7 +58,7 @@ func TestGroups(t *testing.T) {
 	s.Store.SaveUser(store.User{Username: "carla", NTHash: hex.EncodeToString(auth.NTHash("pw-carla")), Enabled: true, GroupID: g.ID})
 
 	if r := papReq(t, "carla", "pw-carla", "AA-BB-CC-DD-EE-FF:Firma"); r.Code != radius.CodeAccessAccept || vlanOf(r) != "30" {
-		t.Fatalf("Gruppen-VLAN: %v vlan=%q %s", r.Code, vlanOf(r), rfc2865.ReplyMessage_GetString(r))
+		t.Fatalf("Gruppen-VLAN: %v vlan=%q %s", r.Code, vlanOf(r), reason(r))
 	}
 	if r := papReq(t, "carla", "pw-carla", "aa:bb:cc:dd:ee:ff:Gaeste"); r.Code != radius.CodeAccessReject {
 		t.Fatal("falsche SSID wurde akzeptiert")
@@ -71,13 +71,13 @@ func TestGroups(t *testing.T) {
 	g.AllowedSSIDs = nil
 	g.AllowedClients = []string{"anderes-geraet"}
 	s.Store.SaveGroup(g)
-	if r := papReq(t, "carla", "pw-carla", ""); r.Code != radius.CodeAccessReject || !strings.Contains(rfc2865.ReplyMessage_GetString(r), "Test-AP") {
-		t.Fatalf("Gerätebeschränkung greift nicht: %v %s", r.Code, rfc2865.ReplyMessage_GetString(r))
+	if r := papReq(t, "carla", "pw-carla", ""); r.Code != radius.CodeAccessReject || !strings.Contains(reason(r), "Test-AP") {
+		t.Fatalf("Gerätebeschränkung greift nicht: %v %s", r.Code, reason(r))
 	}
 	g.AllowedClients = nil
 	g.Enabled = false
 	s.Store.SaveGroup(g)
-	if r := papReq(t, "carla", "pw-carla", ""); r.Code != radius.CodeAccessReject || !strings.Contains(rfc2865.ReplyMessage_GetString(r), "gesperrt") {
+	if r := papReq(t, "carla", "pw-carla", ""); r.Code != radius.CodeAccessReject || !strings.Contains(reason(r), "gesperrt") {
 		t.Fatal("gesperrte Gruppe wurde akzeptiert")
 	}
 	g.Enabled, g.ExpiresAt = true, "2000-01-01"
@@ -98,13 +98,13 @@ func TestActiveDirectory(t *testing.T) {
 	s.Store.UpdateSettings(func(c *store.Settings) { c.AD.Mode, c.AD.RequireGroup = "domain", true })
 
 	// Ohne verknüpfte Gruppe abgelehnt.
-	if r := papReq(t, `FIRMA\erika`, adPass, ""); r.Code != radius.CodeAccessReject || !strings.Contains(rfc2865.ReplyMessage_GetString(r), "verknüpft") {
-		t.Fatalf("ohne Gruppe: %v %s", r.Code, rfc2865.ReplyMessage_GetString(r))
+	if r := papReq(t, `FIRMA\erika`, adPass, ""); r.Code != radius.CodeAccessReject || !strings.Contains(reason(r), "verknüpft") {
+		t.Fatalf("ohne Gruppe: %v %s", r.Code, reason(r))
 	}
 	s.Store.SaveGroup(store.Group{Name: "WLAN", Enabled: true, VLAN: "40", ADGroups: []string{"WLAN-Mitarbeiter"}})
 
 	if r := papReq(t, `FIRMA\erika`, adPass, ""); r.Code != radius.CodeAccessAccept || vlanOf(r) != "40" {
-		t.Fatalf("AD-PAP: %v vlan=%q %s", r.Code, vlanOf(r), rfc2865.ReplyMessage_GetString(r))
+		t.Fatalf("AD-PAP: %v vlan=%q %s", r.Code, vlanOf(r), reason(r))
 	}
 	if r := papReq(t, "erika@firma.local", "falsch", ""); r.Code != radius.CodeAccessReject {
 		t.Fatal("falsches AD-Passwort akzeptiert")
@@ -113,7 +113,7 @@ func TestActiveDirectory(t *testing.T) {
 	// WLAN (PEAP-MSCHAPv2) mit AD-Konto.
 	r, c := peapLogin(t, `FIRMA\erika`, adPass)
 	if r.Code != radius.CodeAccessAccept || vlanOf(r) != "40" {
-		t.Fatalf("AD-PEAP: %v vlan=%q %s (%v)", r.Code, vlanOf(r), rfc2865.ReplyMessage_GetString(r), c.err)
+		t.Fatalf("AD-PEAP: %v vlan=%q %s (%v)", r.Code, vlanOf(r), reason(r), c.err)
 	}
 	if !c.authOK {
 		t.Fatal("Client hat die Serverantwort nicht verifiziert")

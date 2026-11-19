@@ -50,7 +50,7 @@ func TestCheckAttributes(t *testing.T) {
 
 	r := send(nil)
 	if r.Code != radius.CodeAccessAccept {
-		t.Fatalf("passende Anfrage abgelehnt: %s", rfc2865.ReplyMessage_GetString(r))
+		t.Fatalf("passende Anfrage abgelehnt: %s", reason(r))
 	}
 	if rfc2865.ServiceType_Get(r) != rfc2865.ServiceType_Value_AdministrativeUser {
 		t.Error("Reply-Attribut fehlt")
@@ -62,15 +62,15 @@ func TestCheckAttributes(t *testing.T) {
 	}
 
 	r = send(func(p *radius.Packet) { rfc2865.NASPortType_Set(p, rfc2865.NASPortType_Value_Ethernet) })
-	if r.Code != radius.CodeAccessReject || !strings.Contains(rfc2865.ReplyMessage_GetString(r), "erhalten Ethernet") {
-		t.Fatalf("falscher Port-Typ: %v %s", r.Code, rfc2865.ReplyMessage_GetString(r))
+	if r.Code != radius.CodeAccessReject || !strings.Contains(reason(r), "erhalten Ethernet") {
+		t.Fatalf("falscher Port-Typ: %v %s", r.Code, reason(r))
 	}
 	r = send(func(p *radius.Packet) { rfc2865.CallingStationID_SetString(p, "AA-BB-CC-DD-EE-FF") })
 	if r.Code != radius.CodeAccessReject {
 		t.Fatal("falsche MAC akzeptiert")
 	}
 	r = send(func(p *radius.Packet) { rfc2865.NASPortType_Del(p) })
-	if r.Code != radius.CodeAccessReject || !strings.Contains(rfc2865.ReplyMessage_GetString(r), "nicht vorhanden") {
+	if r.Code != radius.CodeAccessReject || !strings.Contains(reason(r), "nicht vorhanden") {
 		t.Fatal("fehlendes Attribut akzeptiert")
 	}
 
@@ -81,7 +81,7 @@ func TestCheckAttributes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if r := send(func(p *radius.Packet) { rfc2865.NASPortType_Set(p, rfc2865.NASPortType_Value_Ethernet) }); r.Code != radius.CodeAccessAccept {
-		t.Fatalf("Benutzer-Check überschreibt Gruppe nicht: %s", rfc2865.ReplyMessage_GetString(r))
+		t.Fatalf("Benutzer-Check überschreibt Gruppe nicht: %s", reason(r))
 	}
 	if r := send(func(p *radius.Packet) { rfc2865.NASPortType_Set(p, rfc2865.NASPortType_Value_Wireless80211) }); r.Code != radius.CodeAccessReject {
 		t.Fatal("Verneinung greift nicht")

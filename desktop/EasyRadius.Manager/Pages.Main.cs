@@ -1,3 +1,4 @@
+using System.IO;
 using System.Net.Http;
 using System.Windows;
 using System.Windows.Controls;
@@ -27,10 +28,12 @@ public class DashboardPage : PageBase
     static Card Stat(SymbolRegular icon, string label, string value, string hint, Brush? accent = null)
     {
         var sp = new StackPanel();
-        var head = UI.Hstack(new SymbolIcon(icon) { FontSize = 18, Foreground = accent ?? UI.Brush("AccentTextFillColorPrimaryBrush"), Margin = new Thickness(0, 0, 8, 0) },
+        var ic = new SymbolIcon(icon) { FontSize = 18, Margin = new Thickness(0, 0, 8, 0) };
+        if (accent != null) ic.Foreground = accent; else ic.SetResourceReference(SymbolIcon.ForegroundProperty, "AccentTextFillColorPrimaryBrush");
+        var head = UI.Hstack(ic,
             new TextBlock { Text = label, Style = UI.Style("Muted"), VerticalAlignment = VerticalAlignment.Center });
         sp.Children.Add(head);
-        sp.Children.Add(new TextBlock { Text = value, FontSize = 28, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 8, 0, 0), Foreground = UI.Brush("TextFillColorPrimaryBrush") });
+        sp.Children.Add(new TextBlock { Text = value, FontSize = 28, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 8, 0, 0) }.Fg());
         sp.Children.Add(new TextBlock { Text = hint, Style = UI.Style("Muted") });
         return new Card { Content = sp, Margin = new Thickness(0, 0, 8, 8), Padding = new Thickness(18, 14, 18, 14), VerticalAlignment = VerticalAlignment.Stretch };
     }
@@ -55,13 +58,24 @@ public class DashboardPage : PageBase
             Body.Children.Add(UI.Btn("Gerät freigeben", SymbolRegular.Add24, async () =>
             {
                 if (await ClientsPage.Edit(new Client { Address = u.Ip })) await Reload();
-            }, ControlAppearance.Primary));
+            }, ControlAppearance.Primary).AdminOnly());
+        }
+
+        if (d.Lockouts > 0)
+        {
+            Body.Children.Add(new InfoBar
+            {
+                Title = d.Lockouts == 1 ? "1 aktive Sperre" : $"{d.Lockouts} aktive Sperren",
+                Message = "Benutzer oder Endgeräte wurden nach zu vielen Fehlversuchen vorübergehend gesperrt.",
+                Severity = InfoBarSeverity.Warning, IsOpen = true, IsClosable = false, Margin = new Thickness(0, 0, 0, 8),
+            });
+            Body.Children.Add(UI.Btn("Sperren anzeigen", SymbolRegular.LockClosed24, () => { UI.Go(typeof(SessionsPage)); return Task.CompletedTask; }));
         }
 
         var stats = new UniformGrid { Columns = 4, Margin = new Thickness(0, 8, -8, 0) };
         stats.Children.Add(Stat(SymbolRegular.Power24, "Status", d.Status.Running ? "Läuft" : "Gestoppt", $"{ip} · UDP {d.Status.AuthPort}/{d.Status.AcctPort}",
             Table.StatusBrush(d.Status.Running)));
-        stats.Children.Add(Stat(SymbolRegular.People24, "Benutzer", d.Users.ToString(), $"{d.ActiveUsers} aktiv · {d.Groups} Gruppen"));
+        stats.Children.Add(Stat(SymbolRegular.People24, "Benutzer", d.Users.ToString(), $"{d.ActiveUsers} aktiv · {d.Groups} Gruppen · {d.Macs} MAC-Adressen"));
         stats.Children.Add(Stat(SymbolRegular.CheckmarkCircle24, "Erfolgreich (24 h)", d.Stats.Accepted24h.ToString(), "Anmeldungen", Table.StatusBrush(true)));
         stats.Children.Add(Stat(SymbolRegular.DismissCircle24, "Abgelehnt (24 h)", d.Stats.Rejected24h.ToString(), "Anmeldungen", Table.StatusBrush(false)));
         Body.Children.Add(stats);
@@ -78,16 +92,16 @@ public class DashboardPage : PageBase
 
         // Diagramm
         var chart = new UniformGrid { Rows = 1, Height = 130 };
-        var max = Math.Max(1, d.Stats.Hours.Max(h => h.Accepted + h.Rejected));
+        var max = Math.Max(1, d.Stats.Hours.Select(h => h.Accepted + h.Rejected).DefaultIfEmpty(0).Max());
         foreach (var h in d.Stats.Hours)
         {
             var col = new StackPanel { VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(1.5, 0, 1.5, 0), ToolTip = $"{h.Start.ToLocalTime():HH}:00 Uhr – {h.Accepted} angenommen, {h.Rejected} abgelehnt", Background = Brushes.Transparent };
             col.Children.Add(new Rectangle { Height = 130.0 * h.Rejected / max, Fill = Table.StatusBrush(false), RadiusX = 2, RadiusY = 2 });
-            col.Children.Add(new Rectangle { Height = 130.0 * h.Accepted / max, Fill = UI.Brush("AccentFillColorDefaultBrush"), RadiusX = 2, RadiusY = 2 });
+            col.Children.Add(new Rectangle { Height = 130.0 * h.Accepted / max, RadiusX = 2, RadiusY = 2 }.Res(Shape.FillProperty, "AccentFillColorDefaultBrush"));
             chart.Children.Add(col);
         }
         var chartBox = new StackPanel();
-        chartBox.Children.Add(new TextBlock { Text = "Anmeldungen der letzten 24 Stunden", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 12), Foreground = UI.Brush("TextFillColorPrimaryBrush") });
+        chartBox.Children.Add(new TextBlock { Text = "Anmeldungen der letzten 24 Stunden", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 12) }.Fg());
         chartBox.Children.Add(new Border { Child = chart, Height = 130 });
         var axis = new Grid { Margin = new Thickness(0, 6, 0, 0) };
         axis.Children.Add(new TextBlock { Text = "vor 24 h", Style = UI.Style("Muted") });
@@ -96,17 +110,17 @@ public class DashboardPage : PageBase
         left.Children.Add(CardOf(chartBox));
 
         var recent = new StackPanel();
-        recent.Children.Add(new TextBlock { Text = "Letzte Ereignisse", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 8), Foreground = UI.Brush("TextFillColorPrimaryBrush") });
+        recent.Children.Add(new TextBlock { Text = "Letzte Ereignisse", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 8) }.Fg());
         foreach (var e in d.Recent) recent.Children.Add(LogPage.Row(e, false));
         if (d.Recent.Count == 0) recent.Children.Add(new TextBlock { Text = "Noch keine Ereignisse.", Style = UI.Style("Muted") });
         left.Children.Add(CardOf(recent));
 
         var online = new StackPanel();
-        online.Children.Add(new TextBlock { Text = "Jetzt verbunden", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 8), Foreground = UI.Brush("TextFillColorPrimaryBrush") });
+        online.Children.Add(new TextBlock { Text = "Jetzt verbunden", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 8) }.Fg());
         foreach (var o in d.Online.Take(12))
         {
             var sp = new StackPanel { Margin = new Thickness(0, 4, 0, 4) };
-            sp.Children.Add(new TextBlock { Text = o.User, FontWeight = FontWeights.SemiBold, Foreground = UI.Brush("TextFillColorPrimaryBrush") });
+            sp.Children.Add(new TextBlock { Text = o.User, FontWeight = FontWeights.SemiBold }.Fg());
             sp.Children.Add(new TextBlock { Text = $"{o.Meta} · {o.StartedText}", Style = UI.Style("Muted") });
             online.Children.Add(sp);
         }
@@ -114,8 +128,8 @@ public class DashboardPage : PageBase
         right.Children.Add(CardOf(online));
 
         var cert = new StackPanel();
-        cert.Children.Add(new TextBlock { Text = "Zertifikat", FontWeight = FontWeights.SemiBold, Foreground = UI.Brush("TextFillColorPrimaryBrush") });
-        cert.Children.Add(new TextBlock { Text = d.Cert.Subject, Margin = new Thickness(0, 8, 0, 0), Foreground = UI.Brush("TextFillColorPrimaryBrush") });
+        cert.Children.Add(new TextBlock { Text = "Zertifikat", FontWeight = FontWeights.SemiBold }.Fg());
+        cert.Children.Add(new TextBlock { Text = d.Cert.Subject, Margin = new Thickness(0, 8, 0, 0) }.Fg());
         cert.Children.Add(new TextBlock { Text = $"gültig bis {d.Cert.NotAfter.ToLocalTime():dd.MM.yyyy}", Style = UI.Style("Muted") });
         right.Children.Add(CardOf(cert));
     }
@@ -137,14 +151,51 @@ public class UsersPage : PageBase
             new("VLAN", nameof(User.VlanText), 160),
             new("Läuft ab", nameof(User.ExpiresText), 100),
             new("Letzte Anmeldung", nameof(User.LastLoginText), 140),
-        ], async u => { if (await Edit(u)) await Reload(); },
-            ("Bearbeiten", async u => { if (await Edit(u)) await Reload(); }),
-            ("Löschen", Delete));
+        ], App.CanWrite ? async u => { if (await Edit(u)) await Reload(); } : null,
+            Table.Writable<User>(
+                ("Bearbeiten", async u => { if (await Edit(u)) await Reload(); }),
+                (CertMenu, IssueCertificate),
+                ("Löschen", Delete)));
         Body.Children.Add(CardOf(list, new Thickness(0)));
         search.TextChanged += (_, _) => Filter();
         Actions(search,
-            UI.Btn("Anmeldung testen", SymbolRegular.Key24, TestLogin),
-            UI.Btn("Benutzer hinzufügen", SymbolRegular.PersonAdd24, async () => { if (await Edit(null)) await Reload(); }, ControlAppearance.Primary));
+            UI.Btn("Anmeldung testen", SymbolRegular.Key24, TestLogin).AdminOnly(),
+            UI.MenuBtn("CSV", SymbolRegular.DocumentTable24,
+                ("Als CSV exportieren …", () => Files.ExportCsv("/api/users.csv", "EasyRadius-Benutzer.csv")),
+                (App.CanWrite ? "Aus CSV importieren …" : "", async () => { if (await Files.ImportCsv("/api/users/import", "Benutzer", ImportHelp)) await Reload(); })),
+            UI.Btn("Benutzer hinzufügen", SymbolRegular.PersonAdd24, async () => { if (await Edit(null)) await Reload(); }, ControlAppearance.Primary).AdminOnly());
+    }
+
+    const string CertMenu = "Zertifikat für EAP-TLS ausstellen …";
+
+    const string ImportHelp = "Spalten (Trennzeichen „;“ oder „,“, erste Zeile = Überschriften): Benutzername; Name; Passwort; Gruppe; VLAN; Aktiv (ja/nein); Läuft ab (JJJJ-MM-TT); Notiz.\n\n"
+        + "Vorhandene Benutzer (gleicher Benutzername) werden aktualisiert, neue brauchen ein Passwort. Die Gruppe wird über ihren Namen zugeordnet. "
+        + "Bei einem Fehler wird nichts übernommen – die Meldung nennt die Zeile.";
+
+    /// <summary>Stellt ein Benutzerzertifikat (.p12) für EAP-TLS aus und speichert es.</summary>
+    static async Task IssueCertificate(User u)
+    {
+        var f = new Form();
+        f.Note($"Stellt ein Zertifikat für „{u.Username}“ aus. Die .p12-Datei wird auf dem Endgerät installiert – es meldet sich dann per EAP-TLS ohne Passwort am WLAN an.");
+        var days = f.Text("Gültigkeit in Tagen", "365", null, "1 bis 3650 Tage.");
+        var p1 = f.Password("Passwort für die Datei", null, "Mindestens 6 Zeichen. Wird beim Installieren auf dem Gerät abgefragt.");
+        var p2 = f.Password("Passwort wiederholen");
+        string? saved = null;
+        var dlg = new FormDialog("Zertifikat ausstellen", f.Panel, "Ausstellen und speichern …");
+        dlg.OnSave = async () =>
+        {
+            if (!int.TryParse(days.Text.Trim(), out var d) || d is < 1 or > 3650) throw new InvalidOperationException("Gültigkeit: bitte 1 bis 3650 Tage angeben.");
+            if (p1.Password.Length < 6) throw new InvalidOperationException("Das Passwort muss mindestens 6 Zeichen haben.");
+            if (p1.Password != p2.Password) throw new InvalidOperationException("Die Passwörter stimmen nicht überein.");
+            var file = Files.SaveAs(Files.SafeName(u.Username) + ".p12", "Zertifikat mit Schlüssel (*.p12)|*.p12");
+            if (file == null) throw new KeepOpen();
+            var (data, _) = await ApiException.NewFeature(() =>
+                App.Api.Download(HttpMethod.Post, $"/api/users/{Uri.EscapeDataString(u.Id)}/certificate", new { days = d, password = p1.Password }));
+            await File.WriteAllBytesAsync(file, data);
+            saved = file;
+        };
+        if (await dlg.ShowAsync() == ContentDialogResult.Primary && saved != null)
+            await UI.Toast($"Zertifikat gespeichert: {System.IO.Path.GetFileName(saved)}");
     }
 
     protected override async Task Reload()
@@ -159,6 +210,10 @@ public class UsersPage : PageBase
             u.VlanText = u.Vlan != "" ? "VLAN " + u.Vlan : g?.Vlan is { Length: > 0 } gv ? $"VLAN {gv} (Gruppe)" : "Standard";
         }
         Filter();
+        // Zertifikate gibt es nur, wenn EAP-TLS eingeschaltet ist.
+        bool tls = false;
+        try { tls = (await App.Api.Get<SettingsInfo>("/api/settings")).Eap.Tls; } catch (ApiException) { }
+        Table.EnableMenu(list, CertMenu, tls, "Erst unter „Einstellungen“ EAP-TLS einschalten.");
     }
 
     void Filter()
@@ -187,8 +242,7 @@ public class UsersPage : PageBase
         var full = new TextBox { Text = u.FullName };
         f.Row(("Benutzername", name), ("Name (optional)", full));
         var pw = new TextBox { PlaceholderText = isNew ? "" : "leer lassen = unverändert" };
-        var gen = new Button { Icon = new SymbolIcon(SymbolRegular.ArrowShuffle24), ToolTip = "Zufällig erzeugen", Margin = new Thickness(6, 0, 0, 0) };
-        gen.Click += (_, _) => pw.Text = UI.RandomPassword();
+        var gen = UI.IconBtn(SymbolRegular.ArrowShuffle24, "Zufälliges Passwort erzeugen", () => pw.Text = UI.RandomPassword());
         var pwRow = new DockPanel();
         DockPanel.SetDock(gen, Dock.Right);
         pwRow.Children.Add(gen);
@@ -211,10 +265,10 @@ public class UsersPage : PageBase
         string? shownPw = null;
         dlg.OnSave = async () =>
         {
-            if (isNew && pw.Text.Trim() == "") throw new InvalidOperationException("Bitte ein Passwort vergeben (oder mit dem Würfel erzeugen).");
+            if (isNew && string.IsNullOrWhiteSpace(pw.Text)) throw new InvalidOperationException("Bitte ein Passwort vergeben (oder mit dem Würfel erzeugen).");
             var body = new
             {
-                username = name.Text.Trim(), fullName = full.Text.Trim(), password = pw.Text.Trim(),
+                username = name.Text.Trim(), fullName = full.Text.Trim(), password = pw.Text, // Passwörter nie kürzen
                 groupId = (group.SelectedItem as Group)?.Id ?? "", vlan = vlan.Text.Trim(),
                 expiresAt = exp.SelectedDate?.ToString("yyyy-MM-dd") ?? "", note = note.Text.Trim(),
                 enabled = enabled.IsChecked == true, attributes = ed2.Collect(),
@@ -236,7 +290,7 @@ public class UsersPage : PageBase
         f.Add("Benutzername", UI.Hstack(new TextBlock { Text = user, FontFamily = new FontFamily("Cascadia Mono, Consolas"), FontSize = 16, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 12, 0) },
             UI.Btn("Kopieren", SymbolRegular.Copy24, () => { UI.Copy(user); return Task.CompletedTask; })));
         f.Add("Passwort", UI.Hstack(new TextBlock { Text = pw, FontFamily = new FontFamily("Cascadia Mono, Consolas"), FontSize = 16, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 12, 0) },
-            UI.Btn("Kopieren", SymbolRegular.Copy24, () => { UI.Copy(pw); return Task.CompletedTask; })));
+            UI.Btn("Kopieren", SymbolRegular.Copy24, () => { UI.CopySecret(pw); return Task.CompletedTask; })));
         f.Note("Beim Verbinden mit dem WLAN: Methode PEAP, Phase 2 MSCHAPv2. Eine Anleitung für jedes Gerät gibt es unter „Zertifikat“ (QR-Code).");
         await UI.Info("Zugangsdaten", f.Panel);
     }
@@ -261,7 +315,7 @@ public class UsersPage : PageBase
                 if (r.Ok) { lines.Add($"Gruppe: {(r.Group == "" ? "keine" : r.Group)}"); lines.Add($"VLAN: {(r.Vlan == "" ? "Standard" : r.Vlan)}"); }
                 lines.Add($"WLAN (PEAP): {(r.WlanOk ? "funktioniert" : "nicht möglich – " + r.WlanNote)}");
                 if (r.Groups is { Count: > 0 }) lines.Add("AD-Gruppen: " + string.Join(", ", r.Groups));
-                result.Children.Add(new TextBlock { Text = string.Join("\n", lines), Margin = new Thickness(0, 8, 0, 0), TextWrapping = TextWrapping.Wrap, Foreground = UI.Brush("TextFillColorPrimaryBrush") });
+                result.Children.Add(new TextBlock { Text = string.Join("\n", lines), Margin = new Thickness(0, 8, 0, 0), TextWrapping = TextWrapping.Wrap }.Fg());
             }
             throw new KeepOpen();
         };

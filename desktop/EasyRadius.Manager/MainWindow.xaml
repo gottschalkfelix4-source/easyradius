@@ -34,8 +34,14 @@
                 <ui:NavigationViewItem Content="Gruppen" TargetPageType="{x:Type local:GroupsPage}">
                     <ui:NavigationViewItem.Icon><ui:SymbolIcon Symbol="PeopleTeam24" /></ui:NavigationViewItem.Icon>
                 </ui:NavigationViewItem>
+                <ui:NavigationViewItem Content="MAC-Adressen" TargetPageType="{x:Type local:MacsPage}">
+                    <ui:NavigationViewItem.Icon><ui:SymbolIcon Symbol="Print24" /></ui:NavigationViewItem.Icon>
+                </ui:NavigationViewItem>
                 <ui:NavigationViewItem Content="Geräte" TargetPageType="{x:Type local:ClientsPage}">
                     <ui:NavigationViewItem.Icon><ui:SymbolIcon Symbol="Router24" /></ui:NavigationViewItem.Icon>
+                </ui:NavigationViewItem>
+                <ui:NavigationViewItem Content="Sitzungen" TargetPageType="{x:Type local:SessionsPage}">
+                    <ui:NavigationViewItem.Icon><ui:SymbolIcon Symbol="PlugConnected24" /></ui:NavigationViewItem.Icon>
                 </ui:NavigationViewItem>
                 <ui:NavigationViewItem Content="Protokoll" TargetPageType="{x:Type local:LogPage}">
                     <ui:NavigationViewItem.Icon><ui:SymbolIcon Symbol="TextBulletListLtr24" /></ui:NavigationViewItem.Icon>
@@ -48,6 +54,9 @@
                 </ui:NavigationViewItem>
             </ui:NavigationView.MenuItems>
             <ui:NavigationView.FooterMenuItems>
+                <ui:NavigationViewItem x:Name="AccountsItem" Content="Konten" TargetPageType="{x:Type local:AccountsPage}">
+                    <ui:NavigationViewItem.Icon><ui:SymbolIcon Symbol="PeopleSettings24" /></ui:NavigationViewItem.Icon>
+                </ui:NavigationViewItem>
                 <ui:NavigationViewItem Content="Einstellungen" TargetPageType="{x:Type local:SettingsPage}">
                     <ui:NavigationViewItem.Icon><ui:SymbolIcon Symbol="Settings24" /></ui:NavigationViewItem.Icon>
                 </ui:NavigationViewItem>

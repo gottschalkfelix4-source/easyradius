@@ -1,6 +1,7 @@
 package letsencrypt
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -58,14 +59,28 @@ func (s *Service) needsRenewal() bool {
 }
 
 // Loop prüft regelmäßig; nach einem Fehler wird frühestens nach 6 Stunden erneut versucht.
-func (s *Service) Loop() {
+// Endet, wenn ctx beendet wird.
+func (s *Service) Loop(ctx context.Context) {
+	t := time.NewTicker(time.Hour)
+	defer t.Stop()
 	for {
 		cfg := s.Store.Settings().ACME
 		if s.needsRenewal() && time.Since(cfg.LastAttempt) > 6*time.Hour {
 			s.Start()
 		}
-		time.Sleep(time.Hour)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
 	}
+}
+
+// sameOrder prüft, ob die Einstellungen noch zum laufenden Auftrag passen
+// (sonst wurde während des Beantragens umgestellt und das Ergebnis verworfen).
+func sameOrder(a, b store.ACMESettings) bool {
+	return a.Enabled == b.Enabled && strings.EqualFold(a.Domain, b.Domain) && a.Method == b.Method &&
+		a.Provider == b.Provider && a.Staging == b.Staging
 }
 
 // ConfigFrom baut den Auftrag aus den Einstellungen (inkl. Übernahme alter Cloudflare-Einstellungen).
@@ -86,6 +101,10 @@ func (s *Service) renew() {
 	s.Store.UpdateSettings(func(c *store.Settings) { c.ACME.LastAttempt = time.Now() })
 	s.Log.Add(events.Event{Kind: events.Info, Message: "Let's Encrypt: Zertifikat für " + a.Domain + " wird beantragt …"})
 	res, err := Obtain(ConfigFrom(a, s.DataDir))
+	if now := s.Store.Settings().ACME; !sameOrder(a, now) {
+		s.Log.Add(events.Event{Kind: events.Info, Message: "Let's Encrypt: Einstellungen wurden während des Beantragens geändert – Ergebnis verworfen"})
+		return
+	}
 	if err == nil {
 		err = s.Certs.Import(res.CertPEM, res.KeyPEM)
 	}

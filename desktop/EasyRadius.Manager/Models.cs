@@ -3,7 +3,20 @@ using System.Windows.Media;
 
 namespace EasyRadius.Manager;
 
-public class StateInfo { public bool Setup { get; set; } public string User { get; set; } = ""; public string Version { get; set; } = ""; public string Server { get; set; } = ""; public string Platform { get; set; } = "windows"; }
+public class StateInfo
+{
+    public bool Setup { get; set; }
+    public string User { get; set; } = "";
+    public string Role { get; set; } = "";      // "admin", "viewer" (ältere Server: leer = Administrator)
+    public string Version { get; set; } = "";
+    public string Server { get; set; } = "";
+    public string Platform { get; set; } = "windows";
+    public bool Secure { get; set; }            // Anfrage kam per HTTPS
+    public bool Loopback { get; set; }
+    public string HttpsPort { get; set; } = "";
+    public bool HttpsOn { get; set; }
+    [JsonIgnore] public bool IsViewer => Role == "viewer";
+}
 
 public class Attr
 {
@@ -86,6 +99,7 @@ public class Group
     [JsonIgnore] public string VlanText => string.IsNullOrEmpty(Vlan) ? "Standard" : "VLAN " + Vlan;
     [JsonIgnore] public string LimitsText { get; set; } = "";
     public override string ToString() => string.IsNullOrEmpty(Vlan) ? Name : $"{Name} (VLAN {Vlan})";
+    public Group Copy() => (Group)MemberwiseClone();
 }
 
 public class Client
@@ -93,11 +107,120 @@ public class Client
     public string Id { get; set; } = "";
     public string Name { get; set; } = "";
     public string Address { get; set; } = "";
-    public string Secret { get; set; } = "";
+    public bool RequireMA { get; set; }
+    public int CoaPort { get; set; }
+    public bool HasSecret { get; set; }
     public string Note { get; set; } = "";
+    public DateTime CreatedAt { get; set; }
     public DateTime LastSeen { get; set; }
     [JsonIgnore] public string LastSeenText => LastSeen.Year < 2000 ? "noch nie" : Fmt.Rel(LastSeen);
+    [JsonIgnore] public string MaText => RequireMA ? "mit MA" : "ohne MA";
+    [JsonIgnore] public Brush MaColor => Table.StatusBrush(RequireMA, true);
+    [JsonIgnore] public string CoaText => CoaPort > 0 ? CoaPort.ToString() : "3799";
 }
+
+/// <summary>MAC-Adresse für Geräte ohne 802.1X (MAC Authentication Bypass).</summary>
+public class MacEntry
+{
+    public string Id { get; set; } = "";
+    public string Mac { get; set; } = "";
+    public string Name { get; set; } = "";
+    public bool Enabled { get; set; } = true;
+    public string Vlan { get; set; } = "";
+    public string GroupId { get; set; } = "";
+    public List<Attr>? Attributes { get; set; } = [];
+    public string Note { get; set; } = "";
+    public string ExpiresAt { get; set; } = "";
+    public DateTime CreatedAt { get; set; }
+    public DateTime LastSeen { get; set; }
+    public bool Expired { get; set; }
+
+    [JsonIgnore] public string GroupName { get; set; } = "";
+    [JsonIgnore] public string VlanText { get; set; } = "";
+    [JsonIgnore] public string StatusText => !Enabled ? "Deaktiviert" : Expired ? "Abgelaufen" : "Aktiv";
+    [JsonIgnore] public Brush StatusColor => Table.StatusBrush(Enabled && !Expired, !Enabled);
+    [JsonIgnore] public string ExpiresText => string.IsNullOrEmpty(ExpiresAt) ? "nie" : Fmt.Date(ExpiresAt);
+    [JsonIgnore] public string LastSeenText => LastSeen.Year < 2000 ? "noch nie" : Fmt.Rel(LastSeen);
+    [JsonIgnore] public string SubText => string.Join(" · ", new[] { Name, Note }.Where(s => !string.IsNullOrEmpty(s)));
+}
+
+public class AcctRecord
+{
+    public string User { get; set; } = "";
+    public string Client { get; set; } = "";
+    public string Station { get; set; } = "";
+    public string Ip { get; set; } = "";
+    public string SessionId { get; set; } = "";
+    public DateTime Start { get; set; }
+    public DateTime Stop { get; set; }
+    public long Seconds { get; set; }
+    public ulong InBytes { get; set; }
+    public ulong OutBytes { get; set; }
+    public string Cause { get; set; } = "";
+    [JsonIgnore] public string StartText => Start.ToLocalTime().ToString("dd.MM.yyyy HH:mm");
+    [JsonIgnore] public string DurationText => Fmt.Duration(Seconds);
+    [JsonIgnore] public string TrafficText => $"↓ {Fmt.Bytes(InBytes)}  ↑ {Fmt.Bytes(OutBytes)}";
+    [JsonIgnore] public string Meta => string.Join(" · ", new[] { Station, Ip }.Where(x => !string.IsNullOrEmpty(x)));
+}
+
+public class AccountingInfo { public List<string> Months { get; set; } = []; public string Month { get; set; } = ""; public List<AcctRecord> Records { get; set; } = []; }
+
+public class Lockout
+{
+    public string Key { get; set; } = "";
+    public string Kind { get; set; } = "";
+    public string Name { get; set; } = "";
+    public DateTime Until { get; set; }
+    [JsonIgnore] public string KindText => Kind == "station" ? "Endgerät" : "Benutzer";
+    [JsonIgnore] public string UntilText => Until.ToLocalTime().ToString("dd.MM.yyyy HH:mm");
+}
+
+public class AdminAccount
+{
+    public string Id { get; set; } = "";
+    public string Username { get; set; } = "";
+    public string Role { get; set; } = "admin";
+    public DateTime CreatedAt { get; set; }
+    public DateTime LastLogin { get; set; }
+    public bool Self { get; set; }
+    [JsonIgnore] public string RoleText => Fmt.Role(Role);
+    [JsonIgnore] public string LastLoginText => Fmt.Rel(LastLogin);
+    [JsonIgnore] public string SubText => Self ? "dein Konto" : "";
+}
+
+public class ApiToken
+{
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string Prefix { get; set; } = "";
+    public string Role { get; set; } = "admin";
+    public string CreatedBy { get; set; } = "";
+    public DateTime CreatedAt { get; set; }
+    public DateTime LastUsed { get; set; }
+    public string ExpiresAt { get; set; } = "";
+    public string Token { get; set; } = "";
+    [JsonIgnore] public string RoleText => Fmt.Role(Role);
+    [JsonIgnore] public string PrefixText => Prefix + "…";
+    [JsonIgnore] public string LastUsedText => Fmt.Rel(LastUsed);
+    [JsonIgnore] public string ExpiresText => string.IsNullOrEmpty(ExpiresAt) ? "nie" : Fmt.Date(ExpiresAt);
+    [JsonIgnore] public string SubText => $"von {CreatedBy}, {CreatedAt.ToLocalTime():dd.MM.yyyy}";
+}
+
+public class ClientCert
+{
+    public string Serial { get; set; } = "";
+    public string User { get; set; } = "";
+    public DateTime Created { get; set; }
+    public DateTime NotAfter { get; set; }
+    public bool Revoked { get; set; }
+    [JsonIgnore] public string StatusText => Revoked ? "Gesperrt" : NotAfter < DateTime.UtcNow ? "Abgelaufen" : "Gültig";
+    [JsonIgnore] public Brush StatusColor => Table.StatusBrush(!Revoked && NotAfter >= DateTime.UtcNow);
+    [JsonIgnore] public string CreatedText => Created.ToLocalTime().ToString("dd.MM.yyyy");
+    [JsonIgnore] public string NotAfterText => NotAfter.ToLocalTime().ToString("dd.MM.yyyy");
+}
+
+public class ImportResult { public int Created { get; set; } public int Updated { get; set; } }
+public class SecretInfo { public string Secret { get; set; } = ""; }
 
 public class Event
 {
@@ -108,19 +231,41 @@ public class Event
     public string? ClientIp { get; set; }
     public string? Station { get; set; }
     public string? Method { get; set; }
+    public string? Admin { get; set; }
     public string Message { get; set; } = "";
 
-    [JsonIgnore] public string Title => string.IsNullOrEmpty(User) ? Message : $"{User} · {Message}";
-    [JsonIgnore] public string Meta => string.Join(" · ", new[] { Client is { Length: > 0 } c ? "über " + c : null, Station is { Length: > 0 } s ? "Gerät " + s : null, Method }.Where(x => !string.IsNullOrEmpty(x)));
+    [JsonIgnore] public bool IsAudit => Kind == "audit";
+    [JsonIgnore] public string Title => IsAudit || string.IsNullOrEmpty(User) ? Message : $"{User} · {Message}";
+    [JsonIgnore] public string Meta => IsAudit
+        ? "Änderung" + (string.IsNullOrEmpty(Admin) ? "" : " durch " + Admin)
+        : string.Join(" · ", new[] { Client is { Length: > 0 } c ? "über " + c : null, Station is { Length: > 0 } s ? "Gerät " + s : null, Method }.Where(x => !string.IsNullOrEmpty(x)));
     [JsonIgnore] public string TimeText => Time.ToLocalTime().ToString("dd.MM.yyyy HH:mm:ss");
     [JsonIgnore] public string RelText => Fmt.Rel(Time);
-    [JsonIgnore] public string Glyph => Kind switch { "accept" => "", "reject" => "", "warning" => "", "acct" => "", _ => "" };
+    [JsonIgnore] public string Glyph => Kind switch { "accept" => "", "reject" => "", "warning" => "", "acct" => "", "audit" => "", _ => "" };
 }
 
 public class Hour { public DateTime Start { get; set; } public int Accepted { get; set; } public int Rejected { get; set; } }
 public class Stats { public int Accepted24h { get; set; } public int Rejected24h { get; set; } public List<Hour> Hours { get; set; } = []; }
 public class ServerStatus { public bool Running { get; set; } public DateTime StartedAt { get; set; } public string Error { get; set; } = ""; public int AuthPort { get; set; } public int AcctPort { get; set; } }
-public class Online { public string User { get; set; } = ""; public string Client { get; set; } = ""; public string Station { get; set; } = ""; public string Ip { get; set; } = ""; public DateTime Started { get; set; } public string Meta => string.Join(" · ", new[] { Station, Ip, Client }.Where(x => !string.IsNullOrEmpty(x))); public string StartedText => Fmt.Rel(Started); }
+public class Online
+{
+    public string Key { get; set; } = "";
+    public string Id { get; set; } = "";
+    public string User { get; set; } = "";
+    public string Client { get; set; } = "";
+    public string ClientId { get; set; } = "";
+    public string NasAddr { get; set; } = "";
+    public string Station { get; set; } = "";
+    public string Ip { get; set; } = "";
+    public DateTime Started { get; set; }
+    public DateTime Updated { get; set; }
+    public ulong InBytes { get; set; }
+    public ulong OutBytes { get; set; }
+    public string Meta => string.Join(" · ", new[] { Station, Ip, Client }.Where(x => !string.IsNullOrEmpty(x)));
+    public string StartedText => Fmt.Rel(Started);
+    public string DurationText => Started.Year < 2000 ? "" : Fmt.Duration((long)(DateTime.UtcNow - Started.ToUniversalTime()).TotalSeconds);
+    public string TrafficText => $"↓ {Fmt.Bytes(InBytes)}  ↑ {Fmt.Bytes(OutBytes)}";
+}
 public class Unknown { public string Ip { get; set; } = ""; public DateTime LastSeen { get; set; } }
 
 public class CertInfo
@@ -142,6 +287,8 @@ public class Dashboard
     public int ActiveUsers { get; set; }
     public int Clients { get; set; }
     public int Groups { get; set; }
+    public int Macs { get; set; }
+    public int Lockouts { get; set; }
     public Stats Stats { get; set; } = new();
     public List<Online> Online { get; set; } = [];
     public List<Unknown> Unknown { get; set; } = [];
@@ -187,7 +334,22 @@ public class AdInfo
     public string Platform { get; set; } = "windows";
 }
 
-public class SettingsInfo { public int AuthPort { get; set; } public int AcctPort { get; set; } public string WebAddr { get; set; } = ""; public string ServerName { get; set; } = ""; public string AdminUser { get; set; } = ""; }
+public class LockoutSettings { public bool Enabled { get; set; } = true; public int Attempts { get; set; } = 10; public int Minutes { get; set; } = 15; }
+public class EapSettings { public bool Ttls { get; set; } = true; public bool Tls { get; set; } }
+
+public class SettingsInfo
+{
+    public int AuthPort { get; set; }
+    public int AcctPort { get; set; }
+    public string WebAddr { get; set; } = "";
+    public string HttpsAddr { get; set; } = "";
+    public bool HttpsOnly { get; set; }
+    public string ServerName { get; set; } = "";
+    public string AdminUser { get; set; } = "";
+    public int LogRetention { get; set; }
+    public LockoutSettings Lockout { get; set; } = new();
+    public EapSettings Eap { get; set; } = new();
+}
 
 public class TestResult
 {
@@ -215,4 +377,22 @@ public static class Fmt
     }
 
     public static string Date(string ymd) => DateTime.TryParse(ymd, out var d) ? d.ToString("dd.MM.yyyy") : ymd;
+
+    public static string Role(string role) => role == "viewer" ? "Nur lesen" : "Administrator";
+
+    public static string Duration(long seconds)
+    {
+        if (seconds < 0) seconds = 0;
+        var t = TimeSpan.FromSeconds(seconds);
+        return t.TotalDays >= 1 ? $"{(int)t.TotalDays} T {t.Hours} Std." : t.TotalHours >= 1 ? $"{(int)t.TotalHours} Std. {t.Minutes} Min." : $"{t.Minutes} Min.";
+    }
+
+    public static string Bytes(ulong b)
+    {
+        string[] units = ["B", "KB", "MB", "GB", "TB"];
+        double v = b;
+        int i = 0;
+        while (v >= 1024 && i < units.Length - 1) { v /= 1024; i++; }
+        return i == 0 ? $"{b} B" : $"{v:0.#} {units[i]}";
+    }
 }

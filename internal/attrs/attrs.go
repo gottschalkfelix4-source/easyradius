@@ -19,6 +19,9 @@ const (
 	Integer = "integer"
 	IPAddr  = "ipaddr"
 	Octets  = "octets"
+	IPv6    = "ipv6addr"   // RFC 3162
+	Prefix6 = "ipv6prefix" // RFC 3162, z. B. 2001:db8::/64
+	IfID    = "ifid"       // Interface-Id, 8 Byte (hex)
 )
 
 // Def beschreibt ein Attribut aus dem Wörterbuch.
@@ -127,6 +130,16 @@ var Dictionary = []Def{
 	{Name: "Framed-Pool", Code: 88, Use: "reply", Type: String},
 	{Name: "NAS-Filter-Rule", Code: 92, Use: "reply", Type: String},
 
+	// --- IPv6 (RFC 3162, 4818, 6911) ---
+	{Name: "NAS-IPv6-Address", Code: 95, Use: "check", Type: IPv6},
+	{Name: "Framed-Interface-Id", Code: 96, Use: "reply", Type: IfID},
+	{Name: "Framed-IPv6-Prefix", Code: 97, Use: "reply", Type: Prefix6, Help: "Präfix für das Endgerät, z. B. 2001:db8:1::/64"},
+	{Name: "Framed-IPv6-Route", Code: 99, Use: "reply", Type: String},
+	{Name: "Framed-IPv6-Pool", Code: 100, Use: "reply", Type: String},
+	{Name: "Delegated-IPv6-Prefix", Code: 123, Use: "reply", Type: Prefix6, Help: "Präfix-Delegation (DHCPv6-PD)"},
+	{Name: "Framed-IPv6-Address", Code: 168, Use: "reply", Type: IPv6},
+	{Name: "DNS-Server-IPv6-Address", Code: 169, Use: "reply", Type: IPv6},
+
 	// --- Hersteller ---
 	{Name: "Zyxel-Privilege-AVPair", Vendor: "Zyxel", VendorID: 890, Code: 3, Use: "reply", Type: String,
 		Help: "Berechtigung am Zyxel-Switch, z. B. shell:priv-lvl=14 (Admin) – Wert laut Switch-Handbuch"},
@@ -220,7 +233,7 @@ func Normalize(a Attr) (Attr, error) {
 			return a, fmt.Errorf("%s: Wert fehlt", a.Name)
 		}
 		switch a.Type {
-		case String, Integer, IPAddr, Octets:
+		case String, Integer, IPAddr, Octets, IPv6, Prefix6, IfID:
 		default:
 			return a, fmt.Errorf("unbekannter Typ %q", a.Type)
 		}
@@ -233,7 +246,7 @@ func Normalize(a Attr) (Attr, error) {
 		return a, errors.New("Herstellerattribute bitte als „Eigenes Herstellerattribut“ mit Hersteller-ID anlegen")
 	}
 	switch a.Type {
-	case String, Integer, IPAddr, Octets:
+	case String, Integer, IPAddr, Octets, IPv6, Prefix6, IfID:
 	default:
 		return a, fmt.Errorf("unbekannter Typ %q", a.Type)
 	}
@@ -258,7 +271,8 @@ func (a Attr) Encode() ([]byte, error) {
 	switch a.Type {
 	case String:
 		v = []byte(a.Value)
-		if a.Tagged {
+		// Tag 0 wird weggelassen (RFC 2868 erlaubt das; viele Switches erwarten es so).
+		if a.Tagged && a.Tag != 0 {
 			v = append([]byte{a.Tag}, v...)
 		}
 	case Integer:
@@ -284,6 +298,28 @@ func (a Attr) Encode() ([]byte, error) {
 			return nil, errors.New("Hex-Wert erwartet, z. B. 0A1B2C")
 		}
 		v = b
+	case IPv6:
+		ip := net.ParseIP(strings.TrimSpace(a.Value))
+		if ip == nil || ip.To4() != nil {
+			return nil, errors.New("IPv6-Adresse erwartet")
+		}
+		v = ip.To16()
+	case Prefix6:
+		_, n, err := net.ParseCIDR(strings.TrimSpace(a.Value))
+		if err != nil || n.IP.To4() != nil {
+			return nil, errors.New("IPv6-Präfix erwartet, z. B. 2001:db8:1::/64")
+		}
+		ones, _ := n.Mask.Size()
+		v = append([]byte{0, byte(ones)}, n.IP.To16()[:(ones+7)/8]...)
+	case IfID:
+		h := strings.NewReplacer(":", "", "-", "", " ", "").Replace(a.Value)
+		b, err := hex.DecodeString(h)
+		if err != nil || len(b) != 8 {
+			return nil, errors.New("Interface-Id erwartet: 8 Byte hex, z. B. 0211:22ff:fe33:4455")
+		}
+		v = b
+	default:
+		return nil, errors.New("Unbekannter Typ " + a.Type)
 	}
 	if len(v) == 0 && a.Type != String {
 		return nil, errors.New("Wert fehlt")
@@ -399,6 +435,21 @@ func (a Attr) matchOne(want string, v []byte) bool {
 		return wildcard(want, ip.String())
 	case Octets:
 		return strings.EqualFold(strings.TrimPrefix(strings.ReplaceAll(want, " ", ""), "0x"), hex.EncodeToString(v))
+	case IPv6:
+		if len(v) != 16 {
+			return false
+		}
+		if strings.Contains(want, "/") {
+			_, n, err := net.ParseCIDR(want)
+			return err == nil && n.Contains(net.IP(v))
+		}
+		w := net.ParseIP(want)
+		return w != nil && w.Equal(net.IP(v))
+	case Prefix6, IfID:
+		w := a
+		w.Value = want
+		exp, err := w.Encode()
+		return err == nil && string(exp) == string(v)
 	default:
 		if a.Tagged && len(v) > 0 && v[0] <= 0x1F {
 			v = v[1:]

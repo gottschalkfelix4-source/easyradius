@@ -6,14 +6,18 @@ import (
 	"crypto/hmac"
 	"crypto/md5"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gottschalkfelix4-source/easyradius/internal/attrs"
@@ -54,6 +58,17 @@ type Server struct {
 	acctMu sync.Mutex
 	online map[string]*OnlineSession
 
+	sem chan struct{} // begrenzt gleichzeitig bearbeitete Pakete
+
+	warnMu sync.Mutex
+	warned map[string]time.Time // gedrosselte Warnungen
+
+	locks lockouts // Sperre nach Fehlversuchen
+
+	DataDir     string  // für Accounting-Protokoll und offene Sitzungen ("" = nur im Speicher)
+	acct        acctLog // abgeschlossene Sitzungen
+	onlineDirty bool    // geschützt durch acctMu
+
 	dirs        dirCache
 	dirOverride directory.Directory // nur für Tests
 }
@@ -64,9 +79,14 @@ type cachedResp struct {
 }
 
 type OnlineSession struct {
-	ID       string    `json:"id"`
+	Key      string    `json:"key"` // eindeutig, für Trennen
+	ID       string    `json:"id"`  // Acct-Session-Id
 	User     string    `json:"user"`
 	Client   string    `json:"client"`
+	ClientID string    `json:"clientId"`
+	NASAddr  string    `json:"nasAddr"` // Absender-IP des Geräts
+	NASIP    string    `json:"nasIp"`   // NAS-IP-Address
+	NASID    string    `json:"nasId"`   // NAS-Identifier
 	Station  string    `json:"station"`
 	IP       string    `json:"ip"`
 	Started  time.Time `json:"started"`
@@ -77,12 +97,26 @@ type OnlineSession struct {
 
 type eapState struct {
 	mu        sync.Mutex
-	peap      *peapSession
+	tun       *tunnelSession // laufendes TLS-Verfahren; Austausch nur unter sessMu
+	method    byte           // aktuell angebotenes EAP-Verfahren
+	offered   []byte         // bereits angebotene Verfahren (gegen Endlosschleifen bei NAK)
+	started   bool           // Client hat das angebotene Verfahren angenommen
 	outerUser string
-	lastSeen  time.Time
+	station   string
+	lastSeen  atomic.Int64 // UnixNano – vom Aufräumer ohne Sperre gelesen
+	lastReqID byte         // ID der zuletzt gesendeten EAP-Anfrage
 	ident     *identity
 	dec       decision
 }
+
+// Grenzen gegen Überlastung durch (gefälschte) Pakete.
+const (
+	maxConcurrent     = 256  // gleichzeitig bearbeitete Pakete
+	maxEAPSessions    = 2000 // offene EAP-Sitzungen insgesamt
+	maxPerStation     = 4    // offene EAP-Sitzungen pro Endgerät
+	maxUnknownClients = 1000
+	maxEAPAccum       = 64 * 1024
+)
 
 func New(st *store.Store, lg *events.Log, cm *certs.Manager) *Server {
 	s := &Server{
@@ -91,6 +125,8 @@ func New(st *store.Store, lg *events.Log, cm *certs.Manager) *Server {
 		cache:    map[string]cachedResp{},
 		unknown:  map[string]time.Time{},
 		online:   map[string]*OnlineSession{},
+		sem:      make(chan struct{}, maxConcurrent),
+		warned:   map[string]time.Time{},
 	}
 	go s.janitor()
 	return s
@@ -116,11 +152,15 @@ func (s *Server) Start() error {
 		return fmt.Errorf("%s", s.lastErr)
 	}
 	s.conns = []net.PacketConn{auth, acct}
+	if s.DataDir != "" && s.acct.dir == "" {
+		s.acct.dir = filepath.Join(s.DataDir, "accounting")
+		s.loadOnline()
+	}
 	s.running = true
 	s.startedAt = time.Now()
 	s.lastErr = ""
-	go s.serve(auth)
-	go s.serve(acct)
+	go s.serve(auth, false)
+	go s.serve(acct, true)
 	s.Log.Add(events.Event{Kind: events.Info, Message: fmt.Sprintf("RADIUS-Server gestartet (Ports %d/%d UDP)", cfg.AuthPort, cfg.AcctPort)})
 	return nil
 }
@@ -132,6 +172,7 @@ func (s *Server) Stop() {
 		c.Close()
 	}
 	s.conns = nil
+	s.saveOnline()
 	if s.running {
 		s.Log.Add(events.Event{Kind: events.Info, Message: "RADIUS-Server gestoppt"})
 	}
@@ -197,9 +238,9 @@ func (s *Server) janitor() {
 		s.cacheMu.Unlock()
 		s.sessMu.Lock()
 		for k, v := range s.sessions {
-			if now.Sub(v.lastSeen) > 60*time.Second {
-				if v.peap != nil {
-					v.peap.abort()
+			if now.Sub(time.Unix(0, v.lastSeen.Load())) > 60*time.Second {
+				if v.tun != nil {
+					v.tun.abort()
 				}
 				delete(s.sessions, k)
 			}
@@ -209,6 +250,7 @@ func (s *Server) janitor() {
 		for k, v := range s.online {
 			if now.Sub(v.Updated) > 24*time.Hour {
 				delete(s.online, k)
+				s.onlineDirty = true
 			}
 		}
 		s.acctMu.Unlock()
@@ -219,35 +261,75 @@ func (s *Server) janitor() {
 			}
 		}
 		s.unknownMu.Unlock()
+		s.pruneLocks()
+		s.saveOnline()
+		if now.Minute() == 0 && now.Second() < 15 {
+			s.pruneAccounting()
+		}
+		s.warnMu.Lock()
+		for k, v := range s.warned {
+			if now.Sub(v) > 10*time.Minute {
+				delete(s.warned, k)
+			}
+		}
+		s.warnMu.Unlock()
 	}
 }
 
-func (s *Server) serve(conn net.PacketConn) {
+// warn schreibt eine Warnung höchstens alle 5 Minuten je Schlüssel ins Protokoll.
+func (s *Server) warn(key string, ev events.Event) {
+	s.warnMu.Lock()
+	last, ok := s.warned[key]
+	if ok && time.Since(last) < 5*time.Minute {
+		s.warnMu.Unlock()
+		return
+	}
+	if !ok && len(s.warned) > 5000 {
+		s.warnMu.Unlock()
+		return
+	}
+	s.warned[key] = time.Now()
+	s.warnMu.Unlock()
+	ev.Kind = events.Warning
+	s.Log.Add(ev)
+}
+
+func (s *Server) serve(conn net.PacketConn, acct bool) {
 	buf := make([]byte, radius.MaxPacketLength)
 	for {
 		n, addr, err := conn.ReadFrom(buf)
 		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				continue
-			}
-			if strings.Contains(err.Error(), "closed") {
+			if errors.Is(err, net.ErrClosed) {
 				return
 			}
-			// Unter Windows liefert UDP nach ICMP "Port unreachable" Fehler – ignorieren.
+			// Unter Windows liefert UDP nach ICMP "Port unreachable" Fehler – ignorieren,
+			// aber nicht im Leerlauf drehen.
+			time.Sleep(5 * time.Millisecond)
 			continue
 		}
 		pkt := append([]byte(nil), buf[:n]...)
-		go s.handle(conn, addr, pkt)
+		select {
+		case s.sem <- struct{}{}:
+			go func() {
+				defer func() { <-s.sem }()
+				s.handle(conn, addr, pkt, acct)
+			}()
+		default:
+			s.warn("overload", events.Event{Message: "Zu viele gleichzeitige Anfragen – Pakete werden verworfen"})
+		}
 	}
 }
 
-func (s *Server) handle(conn net.PacketConn, addr net.Addr, raw []byte) {
+func (s *Server) handle(conn net.PacketConn, addr net.Addr, raw []byte, acctPort bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("Fehler bei Anfrage von %v: %v", addr, r)
 		}
 	}()
 	if len(raw) < 20 {
+		return
+	}
+	if l := int(binary.BigEndian.Uint16(raw[2:4])); l < 20 || l > len(raw) {
 		return
 	}
 	ua, ok := addr.(*net.UDPAddr)
@@ -262,15 +344,37 @@ func (s *Server) handle(conn net.PacketConn, addr net.Addr, raw []byte) {
 	if !ok {
 		s.unknownMu.Lock()
 		last, seen := s.unknown[ip.String()]
-		s.unknown[ip.String()] = time.Now()
+		if seen || len(s.unknown) < maxUnknownClients {
+			s.unknown[ip.String()] = time.Now()
+		}
 		s.unknownMu.Unlock()
 		if !seen || time.Since(last) > 10*time.Minute {
-			s.Log.Add(events.Event{Kind: events.Warning, ClientIP: ip.String(),
+			s.warn("unknown|"+ip.String(), events.Event{ClientIP: ip.String(),
 				Message: "Anfrage von unbekanntem Gerät " + ip.String() + " ignoriert – unter „Geräte“ freigeben"})
 		}
 		return
 	}
 	secret := []byte(client.Secret)
+	code := radius.Code(raw[0])
+
+	// Echtheit prüfen, bevor irgendetwas gespeichert wird.
+	if !radius.IsAuthenticRequest(raw, secret) {
+		s.warn("secret|"+ip.String(), events.Event{Client: client.Name, ClientIP: ip.String(),
+			Message: "Accounting-Paket mit falschem Shared Secret verworfen – Secret auf dem Gerät prüfen"})
+		return
+	}
+	present, valid := checkMessageAuthenticator(raw, secret)
+	if present && !valid {
+		s.warn("secret|"+ip.String(), events.Event{Client: client.Name, ClientIP: ip.String(),
+			Message: "Falsches Shared Secret (Message-Authenticator ungültig) – Secret auf dem Gerät prüfen"})
+		return
+	}
+	// Schutz vor Blast-RADIUS (CVE-2024-3596): Message-Authenticator verlangen.
+	if !present && (code == radius.CodeStatusServer || (code == radius.CodeAccessRequest && client.RequireMA)) {
+		s.warn("noma|"+ip.String(), events.Event{Client: client.Name, ClientIP: ip.String(),
+			Message: "Anfrage ohne Message-Authenticator verworfen (Schutz vor Blast-RADIUS) – am Gerät aktivieren oder beim Gerät die Pflicht abschalten"})
+		return
+	}
 
 	// Wiederholte Anfrage? Dann gespeicherte Antwort erneut senden.
 	key := addr.String() + "|" + hex.EncodeToString(raw[1:2]) + hex.EncodeToString(raw[4:20])
@@ -285,17 +389,6 @@ func (s *Server) handle(conn net.PacketConn, addr net.Addr, raw []byte) {
 	s.cache[key] = cachedResp{expires: time.Now().Add(30 * time.Second)} // in Bearbeitung
 	s.cacheMu.Unlock()
 
-	if !radius.IsAuthenticRequest(raw, secret) {
-		s.Log.Add(events.Event{Kind: events.Warning, Client: client.Name, ClientIP: ip.String(),
-			Message: "Accounting-Paket mit falschem Shared Secret verworfen"})
-		return
-	}
-	present, valid := checkMessageAuthenticator(raw, secret)
-	if present && !valid {
-		s.Log.Add(events.Event{Kind: events.Warning, Client: client.Name, ClientIP: ip.String(),
-			Message: "Falsches Shared Secret (Message-Authenticator ungültig) – Secret auf dem Gerät prüfen"})
-		return
-	}
 	p, err := radius.Parse(raw, secret)
 	if err != nil {
 		return
@@ -305,18 +398,31 @@ func (s *Server) handle(conn net.PacketConn, addr net.Addr, raw []byte) {
 	var resp *radius.Packet
 	switch p.Code {
 	case radius.CodeAccessRequest:
+		if acctPort {
+			return
+		}
 		resp = s.handleAccess(p, &client, ip, present)
 	case radius.CodeAccountingRequest:
 		resp = s.handleAccounting(p, &client, ip)
-	case radius.CodeStatusServer:
-		resp = p.Response(radius.CodeAccessAccept)
+	case radius.CodeStatusServer: // RFC 5997
+		if acctPort {
+			resp = p.Response(radius.CodeAccountingResponse)
+		} else {
+			resp = p.Response(radius.CodeAccessAccept)
+		}
 	default:
 		return
 	}
 	if resp == nil {
 		return
 	}
-	out, err := encodeWithMA(resp, p.Code != radius.CodeAccountingRequest)
+	// Proxy-State unverändert und in gleicher Reihenfolge zurückgeben (RFC 2865 5.33).
+	for _, a := range p.Attributes {
+		if a.Type == rfc2865.ProxyState_Type {
+			resp.Add(rfc2865.ProxyState_Type, append(radius.Attribute(nil), a.Attribute...))
+		}
+	}
+	out, err := encodeWithMA(resp, resp.Code != radius.CodeAccountingResponse)
 	if err != nil {
 		log.Printf("Antwort kodieren: %v", err)
 		return
@@ -339,18 +445,32 @@ func (s *Server) handleAccess(p *radius.Packet, c *store.Client, ip net.IP, hasM
 
 	if eap := eapMessage(p); eap != nil {
 		if !hasMA {
-			ev.Kind, ev.Message = events.Reject, "EAP-Anfrage ohne Message-Authenticator abgelehnt"
-			s.Log.Add(ev)
-			return p.Response(radius.CodeAccessReject)
+			s.warn("eapnoma|"+ev.ClientIP, events.Event{Client: ev.Client, ClientIP: ev.ClientIP,
+				Message: "EAP-Anfrage ohne Message-Authenticator verworfen"})
+			return nil
 		}
 		return s.handleEAP(p, c, eap, ev)
 	}
 
 	rc := reqCtx{client: *c, ssid: ssidFromCalled(rfc2865.CalledStationID_GetString(p)), req: p}
+	cr := cred{station: ev.Station}
+
+	// MAC-Anmeldung (MAB) für Geräte ohne 802.1X.
+	if id, reason, isMAB := s.macIdentity(p); isMAB {
+		ev.Method = "MAC"
+		if id == nil {
+			return s.reject(p, ev, reason)
+		}
+		dec, reason := s.authorize(id, rc)
+		if reason != "" {
+			return s.reject(p, ev, reason)
+		}
+		return s.accept(p, ev, id, dec)
+	}
 
 	if pw, err := rfc2865.UserPassword_LookupString(p); err == nil {
 		ev.Method = "PAP"
-		id, reason := s.verifyPAP(ev.User, pw)
+		id, reason := s.verifyPAP(ev.User, pw, cr)
 		if id == nil {
 			return s.reject(p, ev, reason)
 		}
@@ -368,7 +488,7 @@ func (s *Server) handleAccess(p *radius.Packet, c *store.Client, ip net.IP, hasM
 			return s.reject(p, ev, "Ungültige MS-CHAPv2-Daten")
 		}
 		ident := resp[0]
-		id, res, reason := s.verifyMSCHAP(ev.User, chal, resp[2:18], resp[26:50])
+		id, res, reason := s.verifyMSCHAP(ev.User, chal, resp[2:18], resp[26:50], cr)
 		if id == nil {
 			r := s.reject(p, ev, reason)
 			microsoft.MSCHAPError_Add(r, append([]byte{ident}, []byte("E=691 R=0 V=3")...))
@@ -401,7 +521,9 @@ func (s *Server) reject(p *radius.Packet, ev events.Event, reason string) *radiu
 	ev.Kind, ev.Message = events.Reject, reason
 	s.Log.Add(ev)
 	r := p.Response(radius.CodeAccessReject)
-	rfc2865.ReplyMessage_SetString(r, reason)
+	// Nach außen nur eine allgemeine Meldung – Details stehen im Protokoll
+	// (keine Rückschlüsse auf Benutzernamen, keine gespiegelten Anfragewerte).
+	rfc2865.ReplyMessage_SetString(r, "Anmeldung abgelehnt")
 	return r
 }
 
@@ -432,7 +554,7 @@ func (s *Server) accept(p *radius.Packet, ev events.Event, id *identity, dec dec
 	if dec.VLAN != "" && !hasTunnelAttrs(dec.Attrs) {
 		rfc2868.TunnelType_Add(r, 0, rfc3580.TunnelType_Value_VLAN)
 		rfc2868.TunnelMediumType_Add(r, 0, rfc2868.TunnelMediumType_Value_IEEE802)
-		rfc2868.TunnelPrivateGroupID_AddString(r, 0, dec.VLAN)
+		r.Add(rfc2868.TunnelPrivateGroupID_Type, radius.Attribute(dec.VLAN)) // ohne Tag-Byte, wie bei FreeRADIUS
 	}
 	addAttrs(r, dec.Attrs)
 	return r
@@ -480,36 +602,41 @@ func (s *Server) handleEAP(p *radius.Packet, c *store.Client, eap []byte, ev eve
 	if len(eap) < 5 || eap[0] != eapResponse {
 		return s.eapReject(p, ev, 0, "Ungültige EAP-Nachricht")
 	}
-	id, typ, data := eap[1], eap[4], eap[5:]
-	if l := int(binary.BigEndian.Uint16(eap[2:4])); l <= len(eap) && l >= 5 {
-		data = eap[5:l]
+	l := int(binary.BigEndian.Uint16(eap[2:4]))
+	if l < 5 || l > len(eap) {
+		return nil // unstimmige Länge: still verwerfen
 	}
+	id, typ, data := eap[1], eap[4], eap[5:l]
+	rc := reqCtx{client: *c, ssid: ssidFromCalled(rfc2865.CalledStationID_GetString(p)), req: p}
 
 	state := rfc2865.State_Get(p)
 	if typ == eapTypeIdentity || len(state) == 0 {
 		if typ != eapTypeIdentity {
 			return s.eapReject(p, ev, id, "EAP ohne Identität begonnen")
 		}
-		// Neue Sitzung: PEAP anbieten.
-		st := &eapState{outerUser: string(data), lastSeen: time.Now()}
-		rc := reqCtx{client: *c, ssid: ssidFromCalled(rfc2865.CalledStationID_GetString(p)), req: p}
-		verify := func(name string, authC, peerC, ntResp []byte) (string, string, string) {
-			ident, res, why := s.verifyMSCHAP(name, authC, peerC, ntResp)
-			if ident == nil {
-				return "", "", why
+		// Neue Sitzung: PEAP anbieten (mit Obergrenzen gegen Überlastung).
+		station := rfc2865.CallingStationID_GetString(p)
+		s.sessMu.Lock()
+		total, perStation := len(s.sessions), 0
+		for _, o := range s.sessions {
+			if station != "" && o.station == station {
+				perStation++
 			}
-			dec, why := s.authorize(ident, rc)
-			if why != "" {
-				return "", ident.Username, why
-			}
-			st.ident, st.dec = ident, dec
-			return res.AuthenticatorResponse, ident.Username, ""
 		}
-		ps := newPEAPSession(s.Certs.Certificate(), verify, s.Store.Settings().ServerName)
-		if !ps.start() {
-			return s.eapReject(p, ev, id, "PEAP konnte nicht gestartet werden")
+		s.sessMu.Unlock()
+		if total >= maxEAPSessions || perStation >= maxPerStation {
+			s.warn("eaplimit|"+station, events.Event{Client: ev.Client, ClientIP: ev.ClientIP, Station: station,
+				Message: "Zu viele gleichzeitige WLAN-Anmeldungen – Anfrage verworfen"})
+			return nil
 		}
-		st.peap = ps
+		st := &eapState{outerUser: string(data), station: station}
+		st.lastSeen.Store(time.Now().UnixNano())
+		ts, why := s.newTunnel(eapTypePEAP, st, rc, p)
+		if ts == nil {
+			return s.eapReject(p, ev, id, why)
+		}
+		st.tun, st.method, st.offered = ts, eapTypePEAP, []byte{eapTypePEAP}
+		st.lastReqID = id + 1
 		sid := newStateID()
 		s.sessMu.Lock()
 		s.sessions[sid] = st
@@ -526,17 +653,43 @@ func (s *Server) handleEAP(p *radius.Packet, c *store.Client, eap []byte, ev eve
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.lastSeen = time.Now()
-	ps := st.peap
+	if id != st.lastReqID {
+		return nil // Antwort passt nicht zur letzten Anfrage (Wiederholung/Fremdpaket): verwerfen
+	}
+	st.lastSeen.Store(time.Now().UnixNano())
+	ev.Method = methodName(st.method)
 
 	if typ == eapTypeNak {
-		s.dropSession(sid)
-		return s.eapReject(p, ev, id, "Gerät möchte kein PEAP – im WLAN-Profil „PEAP“ mit „MSCHAPv2“ wählen")
+		// Das Gerät möchte ein anderes Verfahren (Liste in Wunschreihenfolge).
+		next := s.pickMethod(data, st)
+		if next == 0 {
+			s.dropSession(sid)
+			return s.eapReject(p, ev, id, s.nakHint(data))
+		}
+		ev.Method = methodName(next)
+		ts, why := s.newTunnel(next, st, rc, p)
+		if ts == nil {
+			s.dropSession(sid)
+			return s.eapReject(p, ev, id, why)
+		}
+		s.sessMu.Lock()
+		old := st.tun
+		st.tun = ts
+		s.sessMu.Unlock()
+		if old != nil {
+			old.abort()
+		}
+		st.method = next
+		st.offered = append(st.offered, next)
+		st.lastReqID = id + 1
+		return s.challenge(p, sid, buildEAP(eapRequest, id+1, next, []byte{peapFlagStart}))
 	}
-	if typ != eapTypePEAP || len(data) < 1 {
+	ps := st.tun
+	if typ != st.method || len(data) < 1 {
 		s.dropSession(sid)
 		return s.eapReject(p, ev, id, fmt.Sprintf("Nicht unterstützte EAP-Methode %d", typ))
 	}
+	st.started = true
 	flags := data[0]
 	payload := data[1:]
 	if flags&peapFlagLength != 0 && len(payload) >= 4 {
@@ -545,12 +698,18 @@ func (s *Server) handleEAP(p *radius.Packet, c *store.Client, eap []byte, ev eve
 
 	// Client bestätigt ein Fragment von uns → nächstes schicken.
 	if len(ps.pendingOut) > 0 && len(payload) == 0 {
-		return s.challenge(p, sid, buildEAP(eapRequest, id+1, eapTypePEAP, ps.nextFragment()))
+		st.lastReqID = id + 1
+		return s.challenge(p, sid, buildEAP(eapRequest, id+1, st.method, ps.nextFragment()))
 	}
 
+	if len(ps.inAccum)+len(payload) > maxEAPAccum {
+		s.dropSession(sid)
+		return s.eapReject(p, ev, id, "EAP-Nachricht zu groß")
+	}
 	ps.inAccum = append(ps.inAccum, payload...)
 	if flags&peapFlagMore != 0 {
-		return s.challenge(p, sid, buildEAP(eapRequest, id+1, eapTypePEAP, []byte{0}))
+		st.lastReqID = id + 1
+		return s.challenge(p, sid, buildEAP(eapRequest, id+1, st.method, []byte{0}))
 	}
 	msg := ps.inAccum
 	ps.inAccum = nil
@@ -558,9 +717,15 @@ func (s *Server) handleEAP(p *radius.Packet, c *store.Client, eap []byte, ev eve
 	out, finished := ps.exchange(msg)
 	if finished {
 		s.dropSession(sid)
+		if ps.timedOut.Load() {
+			return s.eapReject(p, ev, id, "Zeitüberschreitung bei der WLAN-Anmeldung")
+		}
 		res := ps.result
 		if res.user != "" {
 			ev.User = res.user
+		}
+		if res.method != "" {
+			ev.Method = res.method
 		}
 		if !res.ok || st.ident == nil {
 			return s.eapReject(p, ev, id, res.reason)
@@ -573,7 +738,130 @@ func (s *Server) handleEAP(p *radius.Packet, c *store.Client, eap []byte, ev eve
 		return r
 	}
 	ps.pendingOut, ps.outTotal = out, len(out)
-	return s.challenge(p, sid, buildEAP(eapRequest, id+1, eapTypePEAP, ps.nextFragment()))
+	st.lastReqID = id + 1
+	return s.challenge(p, sid, buildEAP(eapRequest, id+1, st.method, ps.nextFragment()))
+}
+
+// newTunnel erzeugt und startet die TLS-Sitzung für ein EAP-Verfahren.
+// Bei Fehlern ist das Ergebnis nil und der zweite Wert enthält den Grund.
+func (s *Server) newTunnel(method byte, st *eapState, rc reqCtx, p *radius.Packet) (*tunnelSession, string) {
+	station := st.station
+	serverName := s.Store.Settings().ServerName
+	verify := func(name string, authC, peerC, ntResp []byte) (string, string, string) {
+		ident, res, why := s.verifyMSCHAP(name, authC, peerC, ntResp, cred{station: station})
+		if ident == nil {
+			return "", "", why
+		}
+		dec, why := s.authorize(ident, rc)
+		if why != "" {
+			return "", ident.Username, why
+		}
+		st.ident, st.dec = ident, dec
+		return res.AuthenticatorResponse, ident.Username, ""
+	}
+	var ts *tunnelSession
+	switch method {
+	case eapTypePEAP:
+		ts = newPEAPSession(s.Certs.Certificate(), verify, serverName)
+	case eapTypeTTLS:
+		verifyPAP := func(name, pw string) (string, bool, string) {
+			ident, why := s.verifyPAP(name, pw, cred{station: station})
+			if ident == nil {
+				return "", false, why
+			}
+			dec, why := s.authorize(ident, rc)
+			if why != "" {
+				return ident.Username, false, why
+			}
+			st.ident, st.dec = ident, dec
+			return ident.Username, true, ""
+		}
+		ts = newTTLSSession(s.Certs.Certificate(), verify, verifyPAP, serverName)
+	case eapTypeTLS:
+		pool, err := s.Certs.ClientCAPool()
+		if err != nil {
+			return nil, "EAP-TLS nicht möglich: keine eigene Zertifizierungsstelle vorhanden (Benutzerzertifikate können nur mit der EasyRadius-CA geprüft werden)"
+		}
+		check := func(leaf *x509.Certificate) (string, string) {
+			cn := leaf.Subject.CommonName
+			if s.Certs.IsRevoked(certs.SerialOf(leaf)) {
+				return cn, "Benutzerzertifikat wurde widerrufen"
+			}
+			if !validName(cn) {
+				return "", "Benutzerzertifikat ohne gültigen Benutzernamen (CN)"
+			}
+			u, ok := s.Store.FindUser(cn)
+			switch {
+			case !ok:
+				return cn, "Kein lokaler Benutzer zum Zertifikat „" + cn + "“"
+			case !u.Enabled:
+				return u.Username, "Benutzer ist deaktiviert"
+			case u.Expired(time.Now()):
+				return u.Username, "Benutzerkonto ist abgelaufen"
+			}
+			ident := &identity{Username: u.Username, Local: &u}
+			dec, why := s.authorize(ident, rc)
+			if why != "" {
+				return u.Username, why
+			}
+			st.ident, st.dec = ident, dec
+			return u.Username, ""
+		}
+		ts = newEAPTLSSession(s.Certs.Certificate(), pool, check, serverName)
+	default:
+		return nil, fmt.Sprintf("Nicht unterstützte EAP-Methode %d", method)
+	}
+	ts.fragSize = fragSizeFor(p)
+	if !ts.start() {
+		ts.abort()
+		return nil, methodName(method) + " konnte nicht gestartet werden"
+	}
+	return ts, ""
+}
+
+// pickMethod wählt aus der NAK-Liste des Geräts das erste eingeschaltete,
+// noch nicht angebotene Verfahren (0 = keines). Nur vor Beginn des Austauschs erlaubt.
+func (s *Server) pickMethod(wanted []byte, st *eapState) byte {
+	if st.started {
+		return 0
+	}
+	set := s.Store.Settings().EAP
+	for _, t := range wanted {
+		if bytes.IndexByte(st.offered, t) >= 0 {
+			continue
+		}
+		if t == eapTypePEAP || (t == eapTypeTTLS && set.TTLS) || (t == eapTypeTLS && set.TLS) {
+			return t
+		}
+	}
+	return 0
+}
+
+// nakHint erklärt, welche Verfahren im WLAN-Profil eingestellt werden können.
+func (s *Server) nakHint(wanted []byte) string {
+	set := s.Store.Settings().EAP
+	var off []string
+	for _, t := range wanted {
+		if t == eapTypeTTLS && !set.TTLS {
+			off = append(off, "EAP-TTLS")
+		}
+		if t == eapTypeTLS && !set.TLS {
+			off = append(off, "EAP-TLS")
+		}
+	}
+	extra := ""
+	if len(off) > 0 {
+		extra = " (" + strings.Join(off, " und ") + " in den Einstellungen ausgeschaltet)"
+	}
+	switch {
+	case set.TTLS && set.TLS:
+		return "Gerät möchte weder PEAP noch EAP-TTLS oder EAP-TLS – im WLAN-Profil „PEAP“ mit „MSCHAPv2“, „TTLS“ mit „PAP“/„MSCHAPv2“ oder „TLS“ mit Benutzerzertifikat wählen" + extra
+	case set.TTLS:
+		return "Gerät möchte weder PEAP noch EAP-TTLS – im WLAN-Profil „PEAP“ mit „MSCHAPv2“ oder „TTLS“ mit „PAP“/„MSCHAPv2“ wählen" + extra
+	case set.TLS:
+		return "Gerät möchte weder PEAP noch EAP-TLS – im WLAN-Profil „PEAP“ mit „MSCHAPv2“ oder „TLS“ mit Benutzerzertifikat wählen" + extra
+	}
+	return "Gerät möchte kein PEAP – im WLAN-Profil „PEAP“ mit „MSCHAPv2“ wählen" + extra
 }
 
 func (s *Server) challenge(p *radius.Packet, sid string, eap []byte) *radius.Packet {
@@ -591,11 +879,28 @@ func (s *Server) eapReject(p *radius.Packet, ev events.Event, id byte, reason st
 
 func (s *Server) dropSession(sid string) {
 	s.sessMu.Lock()
-	if st := s.sessions[sid]; st != nil && st.peap != nil {
-		st.peap.abort()
+	if st := s.sessions[sid]; st != nil && st.tun != nil {
+		st.tun.abort()
 	}
 	delete(s.sessions, sid)
 	s.sessMu.Unlock()
+}
+
+// fragSizeFor passt die TLS-Fragmente an die Framed-MTU des Access Points an
+// (EAP- und RADIUS-Kopf abgezogen), höchstens 1000 Byte.
+func fragSizeFor(p *radius.Packet) int {
+	mtu := int(rfc2865.FramedMTU_Get(p))
+	if mtu == 0 {
+		return fragmentSize
+	}
+	n := mtu - 60
+	if n < 200 {
+		n = 200
+	}
+	if n > fragmentSize {
+		n = fragmentSize
+	}
+	return n
 }
 
 func newStateID() string {
@@ -609,31 +914,61 @@ func newStateID() string {
 func (s *Server) handleAccounting(p *radius.Packet, c *store.Client, ip net.IP) *radius.Packet {
 	typ := rfc2866.AcctStatusType_Get(p)
 	sid := rfc2866.AcctSessionID_GetString(p)
-	key := c.ID + "|" + sid
 	user := rfc2865.UserName_GetString(p)
 	station := rfc2865.CallingStationID_GetString(p)
+	key := c.ID + "|" + sid
+	if sid == "" {
+		key = c.ID + "|" + station + "|" + user
+	}
 	now := time.Now()
+	in := uint64(rfc2866.AcctInputOctets_Get(p)) + uint64(rfc2869.AcctInputGigawords_Get(p))<<32
+	out := uint64(rfc2866.AcctOutputOctets_Get(p)) + uint64(rfc2869.AcctOutputGigawords_Get(p))<<32
+	framed := ""
+	if fip := rfc2865.FramedIPAddress_Get(p); fip != nil {
+		framed = fip.String()
+	}
 
 	s.acctMu.Lock()
 	switch typ {
 	case rfc2866.AcctStatusType_Value_Start, rfc2866.AcctStatusType_Value_InterimUpdate:
 		o := s.online[key]
 		if o == nil {
-			o = &OnlineSession{ID: sid, User: user, Client: c.Name, Station: station, Started: now}
+			if len(s.online) >= 50000 {
+				s.acctMu.Unlock()
+				return p.Response(radius.CodeAccountingResponse)
+			}
+			started := now
+			if t := rfc2866.AcctSessionTime_Get(p); t > 0 {
+				started = now.Add(-time.Duration(t) * time.Second)
+			}
+			o = &OnlineSession{Key: key, ID: sid, User: user, Client: c.Name, ClientID: c.ID, Station: station, Started: started}
 			s.online[key] = o
 		}
-		o.Updated = now
-		if fip := rfc2865.FramedIPAddress_Get(p); fip != nil {
-			o.IP = fip.String()
+		o.Updated, o.NASAddr = now, ip.String()
+		if nip := rfc2865.NASIPAddress_Get(p); nip != nil {
+			o.NASIP = nip.String()
 		}
-		o.InBytes = uint64(rfc2866.AcctInputOctets_Get(p)) + uint64(rfc2869.AcctInputGigawords_Get(p))<<32
-		o.OutBytes = uint64(rfc2866.AcctOutputOctets_Get(p)) + uint64(rfc2869.AcctOutputGigawords_Get(p))<<32
+		o.NASID = rfc2865.NASIdentifier_GetString(p)
+		if framed != "" {
+			o.IP = framed
+		}
+		o.InBytes, o.OutBytes = in, out
+		s.onlineDirty = true
 	case rfc2866.AcctStatusType_Value_Stop:
+		started := now.Add(-time.Duration(rfc2866.AcctSessionTime_Get(p)) * time.Second)
+		if o := s.online[key]; o != nil && framed == "" {
+			framed = o.IP
+		}
 		delete(s.online, key)
+		s.onlineDirty = true
+		s.acct.write(AcctRecord{User: user, Client: c.Name, Station: station, IP: framed, SessionID: sid,
+			Start: started, Stop: now, Seconds: int64(rfc2866.AcctSessionTime_Get(p)), InBytes: in, OutBytes: out,
+			Cause: terminateCause(rfc2866.AcctTerminateCause_Get(p))})
 	case rfc2866.AcctStatusType_Value_AccountingOn, rfc2866.AcctStatusType_Value_AccountingOff:
 		for k := range s.online {
 			if strings.HasPrefix(k, c.ID+"|") {
 				delete(s.online, k)
+				s.onlineDirty = true
 			}
 		}
 	}
@@ -668,6 +1003,12 @@ func checkMessageAuthenticator(raw, secret []byte) (present, valid bool) {
 			for j := i + 2; j < i+18; j++ {
 				cp[j] = 0
 			}
+			switch radius.Code(cp[0]) {
+			case radius.CodeAccountingRequest, radius.CodeDisconnectRequest, radius.CodeCoARequest:
+				for j := 4; j < 20; j++ { // RFC 5176 / FreeRADIUS: Request-Authenticator genullt
+					cp[j] = 0
+				}
+			}
 			m := hmac.New(md5.New, secret)
 			m.Write(cp)
 			return true, hmac.Equal(m.Sum(nil), given)
@@ -684,7 +1025,8 @@ func encodeWithMA(r *radius.Packet, withMA bool) ([]byte, error) {
 		return r.Encode()
 	}
 	rfc2869.MessageAuthenticator_Del(r)
-	r.Add(rfc2869.MessageAuthenticator_Type, make(radius.Attribute, 16))
+	// An erster Stelle (Empfehlung gegen Blast-RADIUS).
+	r.Attributes = append(radius.Attributes{&radius.AVP{Type: rfc2869.MessageAuthenticator_Type, Attribute: make(radius.Attribute, 16)}}, r.Attributes...)
 	b, err := r.MarshalBinary() // Authenticator = Request-Authenticator
 	if err != nil {
 		return nil, err

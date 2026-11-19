@@ -11,8 +11,7 @@
                 <ui:ControlsDictionary />
             </ResourceDictionary.MergedDictionaries>
 
-            <SolidColorBrush x:Key="CheckBrush" Color="#C42B1C" />
-            <SolidColorBrush x:Key="ReplyBrush" Color="#005FB8" />
+            <!-- CheckBrush, ReplyBrush und Status*Brush werden in App.xaml.cs passend zum Design gesetzt. -->
 
             <Style x:Key="PageTitle" TargetType="TextBlock">
                 <Setter Property="FontSize" Value="28" />

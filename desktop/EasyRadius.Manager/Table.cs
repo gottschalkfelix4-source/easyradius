@@ -16,6 +16,9 @@ public static class Table
 {
     public record Column(string Header, string Path, double Width, string? Sub = null, bool Mono = false, string? ColorPath = null, bool Bold = false);
 
+    /// <summary>Menüeinträge mit diesen Namen löschen etwas – sie werden auch über die Entf-Taste ausgelöst.</summary>
+    static readonly string[] DeleteActions = ["Löschen", "Entfernen"];
+
     public static ListView Create<T>(IEnumerable<Column> cols, Func<T, Task>? onOpen = null, params (string text, Func<T, Task> act)[] menu) where T : class
     {
         var view = new GridView();
@@ -34,22 +37,41 @@ public static class Table
             foreach (var (text, act) in menu)
             {
                 var mi = new System.Windows.Controls.MenuItem { Header = text };
+                if (DeleteActions.Contains(text)) mi.InputGestureText = "Entf";
                 mi.Click += async (_, _) => { if (lv.SelectedItem is T t) await Run(() => act(t)); };
                 cm.Items.Add(mi);
             }
             lv.ContextMenu = cm;
         }
+        var delete = menu.FirstOrDefault(m => DeleteActions.Contains(m.text)).act;
         lv.KeyDown += async (_, e) =>
         {
-            if (e.Key == Key.Enter && onOpen != null && lv.SelectedItem is T t) await Run(() => onOpen(t));
+            if (lv.SelectedItem is not T t) return;
+            if (e.Key == Key.Enter && onOpen != null) { e.Handled = true; await Run(() => onOpen(t)); }
+            else if (e.Key == Key.Delete && delete != null) { e.Handled = true; await Run(() => delete(t)); }
         };
         return lv;
+    }
+
+    /// <summary>Menüeinträge, die etwas ändern – für „Nur lesen“-Konten entfallen sie.</summary>
+    public static (string text, Func<T, Task> act)[] Writable<T>(params (string text, Func<T, Task> act)[] menu) => App.CanWrite ? menu : [];
+
+    /// <summary>Schaltet einen Kontextmenü-Eintrag der Tabelle ein oder aus.</summary>
+    public static void EnableMenu(System.Windows.Controls.ListView lv, string text, bool enabled, string? hint = null)
+    {
+        foreach (var mi in lv.ContextMenu?.Items.OfType<System.Windows.Controls.MenuItem>() ?? [])
+            if (Equals(mi.Header, text))
+            {
+                mi.IsEnabled = enabled;
+                mi.ToolTip = enabled ? null : hint;
+                ToolTipService.SetShowOnDisabled(mi, true);
+            }
     }
 
     static async Task Run(Func<Task> f)
     {
         try { await f(); }
-        catch (ApiException e) { await UI.Toast(e.Message, true); }
+        catch (Exception e) when (UI.IsExpected(e)) { UI.ReportError(e); }
     }
 
     static DataTemplate Cell(Column c)
@@ -81,13 +103,10 @@ public static class Table
         return d as T;
     }
 
-    /// <summary>Farbe für Status-Texte (Aktiv grün, sonst rot/grau).</summary>
-    public static Brush StatusBrush(bool ok, bool warn = false)
-    {
-        bool dark = Wpf.Ui.Appearance.ApplicationThemeManager.GetAppTheme() == Wpf.Ui.Appearance.ApplicationTheme.Dark;
-        var c = ok ? (dark ? Color.FromRgb(0x6C, 0xCB, 0x5F) : Color.FromRgb(0x0F, 0x7B, 0x0F))
-            : warn ? (dark ? Color.FromRgb(0xFC, 0xE1, 0x00) : Color.FromRgb(0x9D, 0x5D, 0x00))
-            : (dark ? Color.FromRgb(0xFF, 0x99, 0xA4) : Color.FromRgb(0xC4, 0x2B, 0x1C));
-        return new SolidColorBrush(c);
-    }
+    /// <summary>
+    /// Farbe für Status-Texte (Aktiv grün, sonst rot bzw. gelb). Liefert die gemeinsamen Pinsel aus den App-Ressourcen,
+    /// deren Farbe sich beim Designwechsel ändert.
+    /// </summary>
+    public static Brush StatusBrush(bool ok, bool warn = false) =>
+        (Brush)Application.Current.Resources[ok ? "StatusOkBrush" : warn ? "StatusWarnBrush" : "StatusErrorBrush"];
 }

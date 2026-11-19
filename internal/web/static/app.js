@@ -7,23 +7,62 @@ const modal = $("#modal");
 
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-async function api(method, url, body) {
+/* Anfrage senden; Fehler mit dem Text des Servers (und dem HTTP-Status in err.status) werfen. */
+async function send(method, url, body) {
   const opt = { method, headers: { "X-EasyRadius": "1" } };
   if (body instanceof FormData) opt.body = body;
   else if (body !== undefined) { opt.body = JSON.stringify(body); opt.headers["Content-Type"] = "application/json"; }
   const res = await fetch(url, opt);
+  if (res.ok) return res;
   let data = null;
   try { data = await res.json(); } catch { /* leer */ }
   if (res.status === 401 && !url.startsWith("/api/login")) { state.user = ""; render(); throw new Error("Bitte anmelden"); }
-  if (!res.ok) throw new Error((data && data.error) || "Fehler " + res.status);
-  return data;
+  const err = new Error((data && data.error) || "Fehler " + res.status);
+  err.status = res.status;
+  err.plain = !(data && data.error); // keine Antwort von der API selbst
+  throw err;
 }
+
+async function api(method, url, body) {
+  const res = await send(method, url, body);
+  try { return await res.json(); } catch { return null; }
+}
+
+/* Datei vom Server holen (POST mit JSON) und im Browser speichern. */
+async function download(url, body, fallbackName) {
+  const res = await send("POST", url, body);
+  const cd = res.headers.get("Content-Disposition") || "";
+  const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
+  let name = fallbackName;
+  if (m) { try { name = decodeURIComponent(m[1]); } catch { name = m[1]; } }
+  saveBlob(await res.blob(), name);
+}
+
+function saveBlob(blob, name) {
+  const href = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 10000);
+}
+
+/* Endpunkt fehlt in dieser Server-Version? */
+const notAvailable = (err) => !!err && (err.status === 405 || (err.status === 404 && err.plain));
+const NOT_AVAILABLE = "Mit dieser Server-Version noch nicht verfügbar";
 
 function toast(msg, bad = false) {
   const t = document.createElement("div");
   t.className = "toast" + (bad ? " bad" : "");
   t.textContent = msg;
-  $("#toasts").append(t);
+  const box = $("#toasts");
+  box.append(t);
+  // Über einem offenen Dialog anzeigen (Top Layer), wo der Browser das kann.
+  if (modal.open && box.showPopover) {
+    try { if (box.matches(":popover-open")) box.hidePopover(); box.showPopover(); } catch { /* ältere Browser */ }
+  }
   setTimeout(() => t.remove(), 3200);
 }
 
@@ -57,6 +96,13 @@ const ICONS = {
   building: '<path d="M4 21V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v16"/><path d="M15 9h4a1 1 0 0 1 1 1v11M3 21h18"/><path d="M8 8h3M8 12h3M8 16h3"/>',
   phone: '<rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M11 18.5h2"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9S14.5 18.3 12 21c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z"/>',
+  printer: '<path d="M7 9V3h10v6"/><rect x="3" y="9" width="18" height="8" rx="2"/><path d="M7 14h10v7H7z"/><path d="M17 12h.01"/>',
+  plug: '<path d="M9 3v5M15 3v5"/><path d="M6 8h12v3a6 6 0 0 1-12 0z"/><path d="M12 17v4"/>',
+  lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  unlock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/>',
+  badge: '<circle cx="12" cy="8" r="4"/><path d="M4.5 21a7.5 7.5 0 0 1 15 0"/><path d="m15.5 15.5 1.5 1.5 3-3"/>',
+  archive: '<rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9"/><path d="M10 13h4"/>',
+  devices: '<rect x="2.5" y="4" width="13" height="10" rx="1.5"/><path d="M6 18h6"/><rect x="17" y="8" width="4.5" height="12" rx="1"/>',
 };
 const icon = (n, cls = "") => `<svg class="i ${cls}" viewBox="0 0 24 24">${ICONS[n] || ""}</svg>`;
 
@@ -75,6 +121,18 @@ const fmtRel = (s) => {
   return fmtDate(s).split(",")[0];
 };
 const fmtTime = (s) => new Date(s).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const fmtDay = (s) => (s ? fmtDate(s).split(",")[0] : "–");
+const fmtDur = (sec) => {
+  sec = Math.max(0, Math.round(sec || 0));
+  if (sec < 60) return `${sec} Sek.`;
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  return h ? `${h} Std. ${m} Min.` : `${m} Min.`;
+};
+const fmtMonth = (ym) => {
+  const [y, m] = String(ym).split("-").map(Number);
+  return y && m ? new Date(y, m - 1, 1).toLocaleDateString("de-DE", { month: "long", year: "numeric" }) : String(ym);
+};
+const isPast = (s) => !!s && !s.startsWith("0001") && new Date(s).getTime() < Date.now();
 const fmtBytes = (n) => { const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0; while (n >= 1024 && i < 4) { n /= 1024; i++; } return n.toFixed(i ? 1 : 0) + " " + u[i]; };
 
 function randomSecret(len = 24) {
@@ -94,23 +152,46 @@ async function copyText(text) {
 }
 
 /* ============ Zustand & Routing ============ */
-const state = { user: "", setup: false, version: "", server: "", route: "", es: null, logFilter: "all", logSearch: "" };
+const state = { user: "", role: "", setup: false, version: "", server: "", route: "", es: null, logFilter: "all", logSearch: "",
+  secure: true, loopback: true, httpsPort: "8443", httpsOn: false };
 const NAV = [
   ["uebersicht", "Übersicht", "home"],
   ["benutzer", "Benutzer", "users"],
+  ["mac", "MAC-Adressen", "printer"],
   ["gruppen", "Gruppen", "team"],
   ["geraete", "Geräte", "router"],
+  ["sitzungen", "Sitzungen", "activity"],
   ["protokoll", "Protokoll", "list"],
   ["zertifikat", "Zertifikat", "shield"],
   ["ad", "Active Directory", "building"],
+  ["konten", "Konten", "badge", true], // nur für Administratoren
 ];
+
+/* Rollen: "viewer" darf nur lesen. */
+const isAdmin = () => state.role !== "viewer";
+const adm = (html) => (isAdmin() ? html : "");
+
+function applyState(s) {
+  Object.assign(state, { user: s.user || "", role: s.role || "", setup: !!s.setup, version: s.version, server: s.server,
+    secure: !!s.secure, loopback: !!s.loopback, httpsPort: s.httpsPort || "8443", httpsOn: !!s.httpsOn });
+}
 
 async function boot() {
   try {
-    const s = await api("GET", "/api/state");
-    Object.assign(state, { user: s.user, setup: s.setup, version: s.version, server: s.server });
+    applyState(await api("GET", "/api/state"));
   } catch (e) { app.innerHTML = `<div class="auth-wrap"><div class="card">Server nicht erreichbar: ${esc(e.message)}</div></div>`; return; }
   render();
+}
+
+/* Hinweis bei unverschlüsselter Verbindung aus dem Netz */
+function bannerHidden() { try { return sessionStorage.getItem("er-nohttps") === "1"; } catch { return false; } }
+function secureBanner() {
+  if (state.secure || state.loopback || bannerHidden()) return "";
+  const target = `https://${location.hostname}:${state.httpsPort}${location.pathname}${location.hash}`;
+  return `<div class="topwarn" id="topwarn">${icon("alert")}
+    <span class="tw-text">Unverschlüsselte Verbindung – Passwörter und Secrets gehen im Klartext übers Netz.
+      ${state.httpsOn ? `<a href="${esc(target)}">Per HTTPS öffnen</a>` : ""}</span>
+    <button class="btn ghost sm" data-action="hideBanner" title="Ausblenden">${icon("x")}</button></div>`;
 }
 
 window.addEventListener("hashchange", render);
@@ -132,16 +213,18 @@ function render() {
 }
 
 function renderShell() {
-  app.innerHTML = `
+  app.innerHTML = secureBanner() + `
   <div class="shell">
     <aside class="side">
       <div class="brand"><div class="logo">${icon("wifi")}</div>EasyRadius</div>
-      <nav class="nav">${NAV.map(([r, t, i]) => `<a href="#/${r}" data-r="${r}">${icon(i)}<span>${t}</span></a>`).join("")}</nav>
+      <nav class="nav">${NAV.filter((n) => !n[3] || isAdmin()).map(([r, t, i]) => `<a href="#/${r}" data-r="${r}" title="${t}">${icon(i)}<span>${t}</span></a>`).join("")}</nav>
       <div class="spacer"></div>
       <div class="foot">
-        <div class="account"><span class="avatar">${esc(state.user.slice(0, 1).toUpperCase())}</span><span class="name">${esc(state.user)}</span>
+        <div class="account"><span class="avatar">${esc(state.user.slice(0, 1).toUpperCase())}</span><span class="name" title="${esc(state.user)}">${esc(state.user)}</span>
+          ${isAdmin() ? "" : `<span class="badge warn ro-badge" title="Dieses Konto darf nichts ändern">Nur lesen</span>`}
+          <button class="btn ghost sm" data-action="logoutAll" title="Überall abmelden">${icon("devices")}</button>
           <button class="btn ghost sm" data-action="logout" title="Abmelden">${icon("logout")}</button></div>
-        <nav class="nav"><a href="#/einstellungen" data-r="einstellungen">${icon("gear")}<span>Einstellungen</span></a></nav>
+        <nav class="nav"><a href="#/einstellungen" data-r="einstellungen" title="Einstellungen">${icon("gear")}<span>Einstellungen</span></a></nav>
       </div>
     </aside>
     <div class="content"><main class="main"></main></div>
@@ -154,9 +237,27 @@ document.addEventListener("click", (e) => {
   const el = e.target.closest("[data-action]");
   if (!el) return;
   const fn = ACTIONS[el.dataset.action];
-  if (fn) { e.preventDefault(); fn(el, e); }
+  if (fn) {
+    e.preventDefault();
+    Promise.resolve().then(() => fn(el, e)).catch((err) => {
+      const box = modal.open && modal.contains(el) && $(".msg", modal);
+      if (box) box.innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+      else toast(err.message, true);
+    });
+  }
 });
 ACTIONS.logout = async () => { await api("POST", "/api/logout"); state.user = ""; location.hash = ""; render(); };
+ACTIONS.logoutAll = () => confirmDialog("Überall abmelden",
+  "Alle Anmeldungen dieses Kontos werden beendet – auf allen Rechnern und in allen Browsern, auch hier.", "Überall abmelden", async () => {
+    await api("POST", "/api/logout-all");
+    state.user = ""; location.hash = ""; render();
+    toast("Überall abgemeldet");
+  });
+ACTIONS.hideBanner = () => {
+  try { sessionStorage.setItem("er-nohttps", "1"); } catch { /* egal */ }
+  const b = $("#topwarn");
+  if (b) b.remove();
+};
 ACTIONS.copy = (el) => copyText(el.dataset.value);
 ACTIONS.close = () => modal.close();
 ACTIONS.reveal = (el) => {
@@ -205,7 +306,7 @@ function confirmDialog(title, text, label, fn) {
 
 /* ============ Einrichtung & Anmeldung ============ */
 function authCard(title, lead, inner) {
-  app.innerHTML = `
+  app.innerHTML = secureBanner() + `
   <div class="auth-wrap"><div class="auth">
     <div class="brand"><div class="logo">${icon("wifi")}</div>EasyRadius</div>
     <p class="lead">${lead}</p>
@@ -226,7 +327,9 @@ function renderSetup() {
     if (d.password !== d.password2) { $(".msg", f).innerHTML = `<div class="error-box">Die Passwörter stimmen nicht überein.</div>`; return; }
     try {
       await api("POST", "/api/setup", { username: d.username, password: d.password });
-      state.setup = false; state.user = d.username; render();
+      state.setup = false; state.user = d.username; state.role = "admin";
+      try { applyState(await api("GET", "/api/state")); } catch { /* Werte von oben reichen */ }
+      app.innerHTML = ""; render();
     } catch (err) { $(".msg", f).innerHTML = `<div class="error-box">${esc(err.message)}</div>`; }
   };
   $("input[name=password]", f).focus();
@@ -242,8 +345,10 @@ function renderLogin() {
     const d = Object.fromEntries(new FormData(f));
     const btn = $("button", f); btn.disabled = true;
     try {
-      await api("POST", "/api/login", d);
-      state.user = d.username; app.innerHTML = ""; render();
+      const r = await api("POST", "/api/login", d);
+      state.user = d.username.trim(); state.role = (r && r.role) || "admin";
+      try { applyState(await api("GET", "/api/state")); } catch { /* Werte von oben reichen */ }
+      app.innerHTML = ""; render();
     } catch (err) { $(".msg", f).innerHTML = `<div class="error-box">${esc(err.message)}</div>`; btn.disabled = false; }
   };
   $("input", f).focus();
@@ -262,13 +367,17 @@ const KIND = {
   warning: ["alert", "Warnung"],
   info: ["info", "System"],
   acct: ["activity", "Sitzung"],
+  audit: ["edit", "Änderung"],
 };
 
 function eventRow(e, absolute = false) {
-  const [ic] = KIND[e.kind] || KIND.info;
-  const who = e.user ? `<b>${esc(e.user)}</b> · ` : "";
-  const meta = [e.client && `über ${esc(e.client)}`, e.station && `Gerät ${esc(e.station)}`, e.method && esc(e.method)].filter(Boolean).join(" · ");
-  return `<div class="ev"><div class="k ${esc(e.kind)}">${icon(ic)}</div>
+  const [ic, label] = KIND[e.kind] || KIND.info;
+  const audit = e.kind === "audit";
+  const who = audit ? (e.admin ? `<b>${esc(e.admin)}</b> · ` : "") : e.user ? `<b>${esc(e.user)}</b> · ` : "";
+  const meta = (audit
+    ? ["Änderung", e.clientIp && `von ${esc(e.clientIp)}`]
+    : [e.client && `über ${esc(e.client)}`, e.station && `Gerät ${esc(e.station)}`, e.method && esc(e.method)]).filter(Boolean).join(" · ");
+  return `<div class="ev"><div class="k ${esc(e.kind)}" title="${esc(label)}">${icon(ic)}</div>
     <div class="t"><div>${who}${esc(e.message)}</div>${meta ? `<div class="meta">${meta}</div>` : ""}</div>
     <div class="time" title="${esc(fmtDate(e.time))}">${absolute ? fmtDate(e.time) : fmtRel(e.time)}</div></div>`;
 }
@@ -296,12 +405,16 @@ VIEWS.uebersicht = async (main) => {
     ${st.running ? "" : `<div class="callout warn" style="margin-bottom:16px"><h3>Der RADIUS-Dienst läuft nicht</h3>${esc(st.error || "Unbekannter Fehler")}</div>`}
     ${d.unknown.length ? `<div class="callout warn" style="margin-bottom:16px"><h3>${icon("alert")} Unbekannte Geräte fragen an</h3>
       ${d.unknown.map((u) => `<div class="row" style="justify-content:space-between;margin-top:6px"><span><b class="mono">${esc(u.ip)}</b> – ${fmtRel(u.lastSeen)}. Anfragen werden ignoriert, bis das Gerät freigegeben ist.</span>
-        <button class="btn sm primary" data-action="addClientIp" data-ip="${esc(u.ip)}">${icon("plus")} Freigeben</button></div>`).join("")}</div>` : ""}
+        ${adm(`<button class="btn sm primary" data-action="addClientIp" data-ip="${esc(u.ip)}">${icon("plus")} Freigeben</button>`)}</div>`).join("")}</div>` : ""}
+    ${d.lockouts > 0 ? `<div class="callout warn" style="margin-bottom:16px"><div class="row" style="justify-content:space-between">
+      <span>${icon("lock")} <b>${d.lockouts}</b> ${d.lockouts === 1 ? "Sperre" : "Sperren"} nach zu vielen Fehlversuchen aktiv.</span>
+      <a class="btn sm" href="#/sitzungen">Ansehen</a></div></div>` : ""}
     <div class="grid g4">
       <div class="card stat"><div class="label"><span class="ico ${st.running ? "ok" : "bad"}">${icon("power")}</span>Status</div>
         <div class="value" style="font-size:20px;margin-top:12px">${st.running ? `<span class="badge ok"><span class="dot pulse"></span> Läuft</span>` : `<span class="badge bad">Gestoppt</span>`}</div>
         <div class="hint" style="margin-top:8px">${esc(ip)} · UDP ${st.authPort}/${st.acctPort}</div></div>
-      <div class="card stat"><div class="label"><span class="ico">${icon("users")}</span>Benutzer</div><div class="value">${d.users}</div><div class="hint">${d.activeUsers} aktiv</div></div>
+      <div class="card stat"><div class="label"><span class="ico">${icon("users")}</span>Benutzer</div><div class="value">${d.users}</div>
+        <div class="hint">${d.activeUsers} aktiv${d.macs > 0 ? ` · <a href="#/mac">${d.macs} MAC-Adresse${d.macs === 1 ? "" : "n"}</a>` : ""}</div></div>
       <div class="card stat"><div class="label"><span class="ico ok">${icon("check")}</span>Erfolgreich (24 h)</div><div class="value">${d.stats.accepted24h}</div><div class="hint">Anmeldungen</div></div>
       <div class="card stat"><div class="label"><span class="ico bad">${icon("x")}</span>Abgelehnt (24 h)</div><div class="value">${d.stats.rejected24h}</div><div class="hint">Anmeldungen</div></div>
     </div>
@@ -315,7 +428,7 @@ VIEWS.uebersicht = async (main) => {
       </div>
       <div>
         ${setupDone ? "" : `<div class="card"><h2>Erste Schritte</h2><ol class="steps">${steps.map(([ok, t]) => `<li class="${ok ? "done" : ""}"><span class="s-text">${t}</span></li>`).join("")}</ol></div>`}
-        <div class="card"><h2>Jetzt verbunden</h2>
+        <div class="card"><div class="row" style="justify-content:space-between"><h2>Jetzt verbunden</h2><a href="#/sitzungen">Alle Sitzungen</a></div>
           ${d.online.length ? d.online.slice(0, 12).map((o) => `<div class="ev"><div class="k acct">${icon("wifi")}</div><div class="t"><b>${esc(o.user || "?")}</b>
             <div class="meta">${esc(o.station || "")} ${o.ip ? "· " + esc(o.ip) : ""} · ${esc(o.client)}</div></div><div class="time">${fmtRel(o.started)}</div></div>`).join("")
             : `<p class="muted">Keine aktiven Sitzungen bekannt. <span title="Damit Sitzungen erscheinen, am Access Point RADIUS-Accounting (Port ${st.acctPort}) aktivieren.">${icon("info")}</span></p>`}
@@ -495,12 +608,17 @@ let usersCache = [];
 let groupsCache = [];
 const groupName = (id) => (groupsCache.find((g) => g.id === id) || {}).name || "";
 VIEWS.benutzer = async (main) => {
-  [usersCache, groupsCache] = await Promise.all([api("GET", "/api/users"), api("GET", "/api/groups")]);
+  let settings;
+  [usersCache, groupsCache, settings] = await Promise.all([api("GET", "/api/users"), api("GET", "/api/groups"),
+    api("GET", "/api/settings").catch(() => null)]);
+  state.eapTls = !!(settings && settings.eap && settings.eap.tls);
   if (state.route !== "benutzer") return;
   main.innerHTML = header("Benutzer", "Personen, die sich am WLAN oder an Geräten anmelden dürfen",
     `<div class="search">${icon("search")}<input type="search" id="usearch" placeholder="Suchen …"></div>
+     <a class="btn" href="/api/users.csv" download title="Als CSV-Datei herunterladen">${icon("download")} Export</a>
+     ${adm(`<button class="btn" data-action="importUsers" title="Aus CSV-Datei übernehmen">${icon("upload")} Import</button>
      <button class="btn" data-action="testUser">${icon("key")} Anmeldung testen</button>
-     <button class="btn primary" data-action="newUser">${icon("plus")} Benutzer hinzufügen</button>`) +
+     <button class="btn primary" data-action="newUser">${icon("plus")} Benutzer hinzufügen</button>`)}`) +
     `<div class="card flush"><div class="table-wrap" id="utable"></div></div>`;
   $("#usearch").oninput = drawUsers;
   drawUsers();
@@ -511,8 +629,8 @@ function drawUsers() {
   const list = usersCache.filter((u) => !q || [u.username, u.fullName, u.note, u.vlan, groupName(u.groupId)].join(" ").toLowerCase().includes(q));
   const el = $("#utable");
   if (!usersCache.length) {
-    el.innerHTML = `<div class="empty">${icon("users")}<h3>Noch keine Benutzer</h3><p>Lege den ersten Benutzer an – er kann sich danach sofort am WLAN anmelden.</p>
-      <button class="btn primary" data-action="newUser">${icon("plus")} Benutzer hinzufügen</button></div>`;
+    el.innerHTML = `<div class="empty">${icon("users")}<h3>Noch keine Benutzer</h3>${adm(`<p>Lege den ersten Benutzer an – er kann sich danach sofort am WLAN anmelden.</p>
+      <button class="btn primary" data-action="newUser">${icon("plus")} Benutzer hinzufügen</button>`)}</div>`;
     return;
   }
   el.innerHTML = `<table><thead><tr><th>Benutzer</th><th>Status</th><th>Gruppe</th><th>VLAN</th><th>Läuft ab</th><th>Letzte Anmeldung</th><th></th></tr></thead><tbody>
@@ -523,9 +641,10 @@ function drawUsers() {
       <td>${u.vlan ? `<span class="badge info">VLAN ${esc(u.vlan)}</span>` : (() => { const g = groupsCache.find((x) => x.id === u.groupId); return g && g.vlan ? `<span class="badge info" title="von der Gruppe">VLAN ${esc(g.vlan)}</span>` : `<span class="muted">Standard</span>`; })()}</td>
       <td>${u.expiresAt ? esc(new Date(u.expiresAt).toLocaleDateString("de-DE")) : `<span class="muted">nie</span>`}</td>
       <td class="muted">${fmtRel(u.lastLoginAt)}</td>
-      <td class="actions">
+      <td class="actions">${adm(`
+        ${state.eapTls ? `<button class="btn ghost sm" data-action="userCert" data-id="${esc(u.id)}" title="Zertifikat (EAP-TLS)">${icon("shield")}</button>` : ""}
         <button class="btn ghost sm" data-action="editUser" data-id="${esc(u.id)}" title="Bearbeiten">${icon("edit")}</button>
-        <button class="btn ghost sm" data-action="deleteUser" data-id="${esc(u.id)}" title="Löschen">${icon("trash")}</button></td>
+        <button class="btn ghost sm" data-action="deleteUser" data-id="${esc(u.id)}" title="Löschen">${icon("trash")}</button>`)}</td>
     </tr>`).join("")}
     ${list.length ? "" : `<tr><td colspan="7" class="muted" style="text-align:center;padding:30px">Keine Treffer</td></tr>`}
   </tbody></table>`;
@@ -615,6 +734,166 @@ ACTIONS.testUser = () => openModal("Anmeldung testen", `
   },
 });
 
+/* CSV-Import (Benutzer und MAC-Adressen) */
+function importDialog(title, url, columns, notes, reload) {
+  openModal(title, `
+    <p class="muted">CSV-Datei mit den Spaltennamen in der ersten Zeile. Trennzeichen Semikolon oder Komma – so, wie Excel speichert.</p>
+    <div class="callout" style="margin-bottom:16px"><div style="font-weight:600;margin-bottom:4px">Spalten</div>
+      <div class="mono" style="font-size:12px;overflow-wrap:anywhere">${columns.map(esc).join(";")}</div>
+      <div class="muted" style="font-size:12px;margin-top:6px">${notes}</div></div>
+    <label class="f"><span>Datei</span><input type="file" name="file" accept=".csv,text/csv"></label>`,
+  {
+    submit: "Importieren",
+    onSubmit: async (fd) => {
+      const f = fd.get("file");
+      if (!f || !f.size) throw new Error("Bitte eine CSV-Datei auswählen.");
+      const r = await api("POST", url, fd);
+      toast(`${r.created} neu, ${r.updated} aktualisiert`);
+      reload();
+    },
+  });
+}
+
+ACTIONS.importUsers = () => importDialog("Benutzer importieren", "/api/users/import",
+  ["Benutzername", "Name", "Passwort", "Gruppe", "VLAN", "Aktiv", "Läuft ab", "Notiz"],
+  `Pflicht ist nur <b>Benutzername</b>. Neue Benutzer brauchen ein Passwort – bei vorhandenen bleibt es ohne Eintrag unverändert.
+   Gruppe per Name, Aktiv = ja/nein, Datum als JJJJ-MM-TT. Englische Spaltennamen (username, password, group …) gehen auch.
+   Bei einem Fehler wird nichts übernommen; die Meldung nennt die Zeile.`,
+  () => VIEWS.benutzer($(".main")));
+
+/* Benutzerzertifikat für EAP-TLS */
+ACTIONS.userCert = (el) => {
+  const u = usersCache.find((x) => x.id === el.dataset.id);
+  if (!u) return;
+  openModal("Zertifikat (EAP-TLS)", `
+    <p class="muted">Erstellt ein Benutzerzertifikat für <b>${esc(u.username)}</b>. Damit meldet sich das Gerät per EAP-TLS ohne Passwort am WLAN an.
+      Die Datei (.p12) enthält Zertifikat und privaten Schlüssel – nur an diese Person weitergeben.</p>
+    <label class="f"><span>Gültigkeit in Tagen</span><input type="number" name="days" min="1" max="3650" value="365"></label>
+    <label class="f"><span>Passwort für die Datei</span>
+      <div class="input-group"><input type="password" name="password" autocomplete="new-password">
+      <button type="button" class="btn" data-action="reveal" title="Anzeigen">${icon("eye")}</button>
+      <button type="button" class="btn" data-action="genpw" title="Zufällig erzeugen">${icon("dice")}</button></div>
+      <small>Mindestens 6 Zeichen. Wird beim Installieren auf dem Gerät abgefragt.</small></label>`,
+  {
+    submit: "Erstellen und herunterladen",
+    onSubmit: async (fd) => {
+      const days = +fd.get("days"), password = String(fd.get("password") || "");
+      if (!(days >= 1 && days <= 3650)) throw new Error("Gültigkeit: 1 bis 3650 Tage.");
+      if (password.length < 6) throw new Error("Das Passwort braucht mindestens 6 Zeichen.");
+      try {
+        await download("/api/users/" + encodeURIComponent(u.id) + "/certificate", { days, password }, u.username + ".p12");
+      } catch (err) { throw notAvailable(err) ? new Error(NOT_AVAILABLE) : err; }
+      toast("Zertifikat erstellt");
+    },
+  });
+};
+
+/* ---------- MAC-Adressen (MAB) ---------- */
+let macsCache = [];
+VIEWS.mac = async (main) => {
+  [macsCache, groupsCache] = await Promise.all([api("GET", "/api/macs"), api("GET", "/api/groups")]);
+  if (state.route !== "mac") return;
+  main.innerHTML = header("MAC-Adressen", "Drucker, Telefone, Kameras und andere Geräte ohne 802.1X – Anmeldung über die MAC-Adresse (MAB)",
+    `<div class="search">${icon("search")}<input type="search" id="msearch" placeholder="Suchen …"></div>
+     <a class="btn" href="/api/macs.csv" download title="Als CSV-Datei herunterladen">${icon("download")} Export</a>
+     ${adm(`<button class="btn" data-action="importMacs" title="Aus CSV-Datei übernehmen">${icon("upload")} Import</button>
+     <button class="btn primary" data-action="newMac">${icon("plus")} MAC-Adresse hinzufügen</button>`)}`) +
+    `<div class="card flush"><div class="table-wrap" id="mtable"></div></div>
+    <div class="card"><h2>So richtest du MAB am Switch ein</h2>
+      <ol class="steps">
+        <li><span class="s-text">Den Switch (oder Access Point) unter <a href="#/geraete">Geräte</a> freigeben.</span></li>
+        <li><span class="s-text">Am Port die MAC-Authentifizierung einschalten (MAB, „MAC-based Authentication“) und diesen Server als RADIUS-Server eintragen.</span></li>
+        <li><span class="s-text">Hier die MAC-Adresse eintragen. Der Switch schickt sie als Benutzername – EasyRadius versteht alle üblichen Schreibweisen.</span></li>
+      </ol>
+      <p class="muted" style="margin:8px 0 0;font-size:12px">Beispiel Cisco am Port: <span class="mono">authentication port-control auto</span> und <span class="mono">mab</span>.
+        Mit VLAN oder Gruppe landet das Gerät im passenden Netz. MAC-Adressen lassen sich fälschen – MAB nur für Geräte nutzen, die kein 802.1X können.</p></div>`;
+  $("#msearch").oninput = drawMacs;
+  drawMacs();
+};
+
+function drawMacs() {
+  const el = $("#mtable");
+  if (!el) return;
+  const q = ($("#msearch")?.value || "").toLowerCase().trim();
+  const qMac = q.replace(/[^0-9a-f]/g, "");
+  const list = macsCache.filter((m) => {
+    if (!q) return true;
+    const hay = [m.mac, m.name, m.note, m.vlan, groupName(m.groupId)].join(" ").toLowerCase();
+    return hay.includes(q) || (qMac.length >= 2 && String(m.mac).replace(/[^0-9a-f]/gi, "").toLowerCase().includes(qMac));
+  });
+  if (!macsCache.length) {
+    el.innerHTML = `<div class="empty">${icon("printer")}<h3>Noch keine MAC-Adressen</h3><p>Für Geräte, die sich nicht selbst per 802.1X anmelden können – der Switch prüft dann nur die MAC-Adresse.</p>
+      ${adm(`<button class="btn primary" data-action="newMac">${icon("plus")} MAC-Adresse hinzufügen</button>`)}</div>`;
+    return;
+  }
+  el.innerHTML = `<table><thead><tr><th>MAC-Adresse</th><th>Name</th><th>Status</th><th>Gruppe</th><th>VLAN</th><th>Zuletzt gesehen</th><th></th></tr></thead><tbody>
+    ${list.map((m) => `<tr>
+      <td class="mono">${esc(m.mac)}</td>
+      <td><div class="who">${m.name ? esc(m.name) : `<span class="muted">–</span>`}${m.note ? `<small>${esc(m.note)}</small>` : ""}</div></td>
+      <td>${!m.enabled ? `<span class="badge">Deaktiviert</span>` : m.expired ? `<span class="badge bad">Abgelaufen</span>` : `<span class="badge ok"><span class="dot"></span>Aktiv</span>`}
+        ${m.expiresAt && !m.expired ? `<br><small class="muted">bis ${esc(fmtDay(m.expiresAt))}</small>` : ""}</td>
+      <td>${m.groupId ? esc(groupName(m.groupId)) : `<span class="muted">–</span>`}${(m.attributes || []).length ? `<br><span class="badge" title="${esc(attrSummary(m.attributes))}">+${m.attributes.length} Attribut${m.attributes.length > 1 ? "e" : ""}</span>` : ""}</td>
+      <td>${m.vlan ? `<span class="badge info">VLAN ${esc(m.vlan)}</span>` : (() => { const g = groupsCache.find((x) => x.id === m.groupId); return g && g.vlan ? `<span class="badge info" title="von der Gruppe">VLAN ${esc(g.vlan)}</span>` : `<span class="muted">Standard</span>`; })()}</td>
+      <td class="muted">${fmtRel(m.lastSeen)}</td>
+      <td class="actions">${adm(`<button class="btn ghost sm" data-action="editMac" data-id="${esc(m.id)}" title="Bearbeiten">${icon("edit")}</button>
+        <button class="btn ghost sm" data-action="deleteMac" data-id="${esc(m.id)}" title="Löschen">${icon("trash")}</button>`)}</td>
+    </tr>`).join("")}
+    ${list.length ? "" : `<tr><td colspan="7" class="muted" style="text-align:center;padding:30px">Keine Treffer</td></tr>`}
+  </tbody></table>`;
+}
+
+function macDialog(m = { enabled: true }) {
+  const isNew = !m.id;
+  openModal(isNew ? "MAC-Adresse hinzufügen" : "MAC-Adresse bearbeiten", `
+    <div class="two">
+      <label class="f"><span>MAC-Adresse</span><input type="text" name="mac" value="${esc(m.mac)}" placeholder="aa-bb-cc-dd-ee-ff" autocomplete="off" spellcheck="false">
+        <small>Jede übliche Schreibweise, z. B. AA:BB:CC:DD:EE:FF oder aabb.ccdd.eeff.</small></label>
+      <label class="f"><span>Name <span class="muted">(optional)</span></span><input type="text" name="name" value="${esc(m.name)}" placeholder="z. B. Drucker Flur"></label>
+    </div>
+    <label class="f"><span>Gruppe</span><select name="groupId"><option value="">Keine Gruppe</option>
+      ${groupsCache.map((g) => `<option value="${esc(g.id)}" ${g.id === m.groupId ? "selected" : ""}>${esc(g.name)}${g.vlan ? " (VLAN " + esc(g.vlan) + ")" : ""}</option>`).join("")}</select>
+      <small>Das Gerät übernimmt VLAN und Regeln der Gruppe.</small></label>
+    <div class="two">
+      <label class="f"><span>Eigenes VLAN <span class="muted">(optional)</span></span><input type="number" name="vlan" min="1" max="4094" value="${esc(m.vlan)}" placeholder="z. B. 40">
+        <small>Hat Vorrang vor dem VLAN der Gruppe.</small></label>
+      <label class="f"><span>Gültig bis <span class="muted">(optional)</span></span><input type="date" name="expiresAt" value="${esc(m.expiresAt)}"></label>
+    </div>
+    <label class="f"><span>Notiz</span><input type="text" name="note" value="${esc(m.note)}" placeholder="z. B. Raum 2.14"></label>
+    <label class="switch"><input type="checkbox" name="enabled" ${m.enabled ? "checked" : ""}> Gerät darf sich anmelden</label>
+    ${attrSection(m.attributes, "Gleichnamige Attribute der Gruppe werden dadurch ersetzt.")}`,
+  {
+    submit: isNew ? "Anlegen" : "Speichern",
+    wide: true,
+    onSubmit: async (fd) => {
+      const body = {
+        mac: String(fd.get("mac") || "").trim(), name: fd.get("name"), enabled: fd.has("enabled"), groupId: fd.get("groupId"),
+        vlan: fd.get("vlan"), expiresAt: fd.get("expiresAt"), note: fd.get("note"), attributes: attrCollect(),
+      };
+      if (!body.mac) throw new Error("Bitte die MAC-Adresse eintragen.");
+      await api(isNew ? "POST" : "PUT", isNew ? "/api/macs" : "/api/macs/" + m.id, body);
+      toast(isNew ? "MAC-Adresse angelegt" : "Gespeichert");
+      VIEWS.mac($(".main"));
+    },
+  });
+  attrEditorMount();
+}
+ACTIONS.newMac = async () => { await loadAttrDict(); macDialog(); };
+ACTIONS.editMac = async (el) => { await loadAttrDict(); macDialog(macsCache.find((m) => m.id === el.dataset.id)); };
+ACTIONS.deleteMac = (el) => {
+  const m = macsCache.find((x) => x.id === el.dataset.id);
+  if (!m) return;
+  confirmDialog("MAC-Adresse löschen", `Soll <b class="mono">${esc(m.mac)}</b>${m.name ? ` (${esc(m.name)})` : ""} gelöscht werden? Das Gerät wird danach am Switch abgewiesen.`, "Löschen", async () => {
+    await api("DELETE", "/api/macs/" + m.id);
+    toast("MAC-Adresse gelöscht");
+    VIEWS.mac($(".main"));
+  });
+};
+ACTIONS.importMacs = () => importDialog("MAC-Adressen importieren", "/api/macs/import",
+  ["MAC", "Name", "Gruppe", "VLAN", "Aktiv", "Läuft ab", "Notiz"],
+  `Pflicht ist nur <b>MAC</b> (jede übliche Schreibweise). Vorhandene Adressen werden aktualisiert.
+   Gruppe per Name, Aktiv = ja/nein, Datum als JJJJ-MM-TT. Bei einem Fehler wird nichts übernommen; die Meldung nennt die Zeile.`,
+  () => VIEWS.mac($(".main")));
+
 /* ---------- Gruppen ---------- */
 VIEWS.gruppen = async (main) => {
   const [groups, clients, ad] = await Promise.all([api("GET", "/api/groups"), api("GET", "/api/clients"), api("GET", "/api/ad")]);
@@ -622,7 +901,7 @@ VIEWS.gruppen = async (main) => {
   if (state.route !== "gruppen") return;
   const clientName = (id) => (clients.find((c) => c.id === id) || {}).name || "?";
   main.innerHTML = header("Gruppen", "Regeln für mehrere Benutzer auf einmal – VLAN, Sperre, erlaubte WLANs und Laufzeit",
-    `<button class="btn primary" data-action="newGroup">${icon("plus")} Gruppe hinzufügen</button>`) +
+    adm(`<button class="btn primary" data-action="newGroup">${icon("plus")} Gruppe hinzufügen</button>`)) +
     `<div class="card flush"><div class="table-wrap">${groups.length ? `<table><thead><tr><th>Gruppe</th><th>Status</th><th>Mitglieder</th><th>VLAN</th><th>Einschränkungen</th><th></th></tr></thead><tbody>
     ${groups.map((g) => {
       const limits = [
@@ -638,13 +917,13 @@ VIEWS.gruppen = async (main) => {
       <td>${g.members}</td>
       <td>${g.vlan ? `<span class="badge info">VLAN ${esc(g.vlan)}</span>` : `<span class="muted">Standard</span>`}</td>
       <td class="muted" style="font-size:12px">${limits.length ? limits.join("<br>") : "keine"}</td>
-      <td class="actions">
+      <td class="actions">${adm(`
         <button class="btn ghost sm" data-action="toggleGroup" data-id="${esc(g.id)}" title="${g.enabled ? "Sperren" : "Entsperren"}">${icon(g.enabled ? "x" : "check")}</button>
         <button class="btn ghost sm" data-action="editGroup" data-id="${esc(g.id)}" title="Bearbeiten">${icon("edit")}</button>
-        <button class="btn ghost sm" data-action="deleteGroup" data-id="${esc(g.id)}" title="Löschen">${icon("trash")}</button></td></tr>`;
+        <button class="btn ghost sm" data-action="deleteGroup" data-id="${esc(g.id)}" title="Löschen">${icon("trash")}</button>`)}</td></tr>`;
     }).join("")}</tbody></table>`
     : `<div class="empty">${icon("team")}<h3>Noch keine Gruppen</h3><p>Mit Gruppen steuerst du VLAN, Zugang und Laufzeit für viele Benutzer gleichzeitig.</p>
-       <button class="btn primary" data-action="newGroup">${icon("plus")} Gruppe hinzufügen</button></div>`}</div></div>
+       ${adm(`<button class="btn primary" data-action="newGroup">${icon("plus")} Gruppe hinzufügen</button>`)}</div>`}</div></div>
     <div class="callout" style="margin-top:12px">Ein Benutzer gehört zu einer Gruppe. Eigene Werte am Benutzer (z. B. VLAN) haben Vorrang.
       ${ad.mode !== "off" ? "AD-Benutzer erhalten die erste passende Gruppe (alphabetisch), deren verknüpfte AD-Gruppe sie angehören." : ""}</div>`;
 };
@@ -712,9 +991,9 @@ VIEWS.ad = async (main) => {
       <span class="stat"><span class="ico" style="width:48px;height:48px">${icon("building")}</span></span>
       <div style="flex:1"><div style="font:600 20px/28px 'Segoe UI Variable Display','Segoe UI',sans-serif">${esc(modeText)}</div>
         <div class="muted">${a.platform !== "windows" ? "EasyRadius läuft unter Linux – Active Directory ist hier per LDAP möglich." : a.joined ? `Dieser Rechner ist Mitglied der Domäne <b>${esc(a.domain)}</b>.` : "Dieser Rechner ist keiner Domäne beigetreten."}</div></div>
-      ${a.mode !== "off" ? `<button class="btn" data-action="testUser">${icon("key")} Anmeldung testen</button>` : ""}
+      ${a.mode !== "off" ? adm(`<button class="btn" data-action="testUser">${icon("key")} Anmeldung testen</button>`) : ""}
     </div></div>
-    <form id="adform" novalidate><div class="msg" style="margin-top:12px"></div>
+    <form id="adform" novalidate><div class="msg" style="margin-top:12px"></div><fieldset class="plain" ${isAdmin() ? "" : "disabled"}>
     <div class="section-title">Anbindung</div>
     <div class="card">
       <label class="switch"><input type="radio" name="mode" value="off" ${a.mode === "off" ? "checked" : ""} style="border-radius:50%"> <span><b>Aus</b> – nur lokale Benutzer</span></label>
@@ -736,8 +1015,8 @@ VIEWS.ad = async (main) => {
     <div class="section-title">Regeln</div>
     ${setting("team", "Nur AD-Benutzer mit verknüpfter Gruppe zulassen", "Empfohlen. Verknüpfung unter „Gruppen“ → AD-Gruppen. Sonst darf sich jedes AD-Konto anmelden.",
       `<label class="switch" style="margin:0"><input type="checkbox" name="requireGroup" ${a.requireGroup ? "checked" : ""}></label>`)}
-    <div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn primary" type="submit">Speichern</button></div>
-    </form>
+    ${adm(`<div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn primary" type="submit">Speichern</button></div>`)}
+    </fieldset></form>
     <div class="callout" style="margin-top:16px"><h3>Hinweise</h3>
       Lokale Benutzer haben immer Vorrang vor gleichnamigen AD-Konten. Anmeldenamen dürfen als <span class="mono">name</span>, <span class="mono">FIRMA\\name</span> oder <span class="mono">name@firma.local</span> eingegeben werden.
       ${a.joined || a.platform !== "windows" ? "" : "<br>Für WLAN mit AD-Passwörtern muss der Rechner der Domäne beitreten (Einstellungen → Konten → Auf Arbeits- oder Schulkonto zugreifen → „Diesen Computer einer lokalen Active Directory-Domäne hinzufügen“). Danach EasyRadius-Dienst neu starten."}</div>`;
@@ -764,17 +1043,19 @@ VIEWS.geraete = async (main) => {
   if (state.route !== "geraete") return;
   const ip = dash.ips[0] || "–";
   main.innerHTML = header("Geräte", "Access Points, Switches und Router, die beim Server anfragen dürfen",
-    `<button class="btn primary" data-action="newClient">${icon("plus")} Gerät hinzufügen</button>`) +
+    adm(`<button class="btn primary" data-action="newClient">${icon("plus")} Gerät hinzufügen</button>`)) +
     `<div class="card flush"><div class="table-wrap">${clients.length ? `<table><thead><tr><th>Name</th><th>IP-Adresse / Netz</th><th>Shared Secret</th><th>Zuletzt gesehen</th><th></th></tr></thead><tbody>
       ${clients.map((c) => `<tr>
-        <td><div class="who">${esc(c.name)}${c.note ? `<small>${esc(c.note)}</small>` : ""}</div></td>
+        <td><div class="who">${esc(c.name)}${c.note ? `<small>${esc(c.note)}</small>` : ""}</div>
+          ${c.requireMA ? "" : `<span class="badge warn" title="Das Gerät muss keinen Message-Authenticator mitsenden – kein Schutz vor Blast-RADIUS. Wenn das Gerät es kann, unter „Bearbeiten“ einschalten.">ohne Blast-RADIUS-Schutz</span>`}</td>
         <td class="mono">${esc(c.address)}</td>
-        <td><span class="mono muted">••••••••</span> <button class="btn ghost sm" data-action="copy" data-value="${esc(c.secret)}" title="Kopieren">${icon("copy")}</button></td>
+        <td>${c.hasSecret === false ? `<span class="badge bad">fehlt</span>` : `<span class="mono muted">••••••••</span>
+          ${adm(`<button class="btn ghost sm" data-action="copySecret" data-id="${esc(c.id)}" title="Kopieren">${icon("copy")}</button>`)}`}</td>
         <td>${c.lastSeen && !c.lastSeen.startsWith("0001") ? `<span class="badge ok">${fmtRel(c.lastSeen)}</span>` : `<span class="badge">noch nie</span>`}</td>
-        <td class="actions"><button class="btn ghost sm" data-action="editClient" data-id="${esc(c.id)}" title="Bearbeiten">${icon("edit")}</button>
-          <button class="btn ghost sm" data-action="deleteClient" data-id="${esc(c.id)}" title="Löschen">${icon("trash")}</button></td></tr>`).join("")}
+        <td class="actions">${adm(`<button class="btn ghost sm" data-action="editClient" data-id="${esc(c.id)}" title="Bearbeiten">${icon("edit")}</button>
+          <button class="btn ghost sm" data-action="deleteClient" data-id="${esc(c.id)}" title="Löschen">${icon("trash")}</button>`)}</td></tr>`).join("")}
       </tbody></table>` : `<div class="empty">${icon("router")}<h3>Noch keine Geräte</h3><p>Füge deinen Access Point (oder Switch) hinzu, damit er Anmeldungen prüfen lassen darf.</p>
-        <button class="btn primary" data-action="newClient">${icon("plus")} Gerät hinzufügen</button></div>`}</div></div>
+        ${adm(`<button class="btn primary" data-action="newClient">${icon("plus")} Gerät hinzufügen</button>`)}</div>`}</div></div>
     <div class="card"><h2>So richtest du deinen Access Point ein</h2>
       <div class="grid g2e">
         <ol class="steps">
@@ -788,7 +1069,8 @@ VIEWS.geraete = async (main) => {
           <dt>Accounting-Port</dt><dd class="mono">${dash.status.acctPort}</dd>
           <dt>Shared Secret</dt><dd>wie beim Gerät hinterlegt</dd>
         </dl></div>
-      </div></div>`;
+      </div>
+      <p class="muted" style="margin:12px 0 0;font-size:12px">Neue Geräte müssen den <b>Message-Authenticator</b> mitsenden (Schutz vor Blast-RADIUS). Lehnt EasyRadius die Anfragen eines älteren Geräts deshalb ab, den Schutz bei diesem Gerät ausschalten – besser ist ein Firmware-Update.</p></div>`;
 };
 
 function clientDialog(c = {}) {
@@ -799,13 +1081,21 @@ function clientDialog(c = {}) {
       <small>Die Adresse, von der das Gerät anfragt. Mit einem Netz (CIDR) gibst du mehrere Geräte auf einmal frei.</small></label>
     <label class="f"><span>Shared Secret</span>
       <div class="input-group"><input type="${isNew ? "text" : "password"}" name="secret" value="${isNew ? esc(randomSecret()) : ""}" placeholder="${isNew ? "" : "leer lassen = unverändert"}" autocomplete="off">
+      ${isNew ? "" : `<button type="button" class="btn" data-action="loadSecret" data-id="${esc(c.id)}" title="Aktuelles Secret anzeigen">${icon("eye")}</button>`}
       <button type="button" class="btn" data-action="genpw" data-kind="secret" title="Neu erzeugen">${icon("dice")}</button></div>
-      <small>Dieses Geheimnis musst du genauso am Gerät eintragen.</small></label>
-    <label class="f"><span>Notiz</span><input type="text" name="note" value="${esc(c.note)}"></label>`,
+      <small>Dieses Geheimnis musst du genauso am Gerät eintragen. Mindestens 8 Zeichen.</small></label>
+    <label class="switch"><input type="checkbox" name="requireMA" ${isNew || c.requireMA ? "checked" : ""}>
+      <span>Message-Authenticator verlangen (Schutz vor Blast-RADIUS)<br><small class="muted">Empfohlen. Nur für ältere Geräte ausschalten, die ihn nicht mitsenden.</small></span></label>
+    <div class="two">
+      <label class="f"><span>CoA-Port <span class="muted">(optional)</span></span><input type="number" name="coaPort" min="1" max="65535" value="${c.coaPort ? esc(c.coaPort) : ""}" placeholder="3799">
+        <small>Hierhin schickt EasyRadius „Sitzung trennen“. Leer = 3799.</small></label>
+      <label class="f"><span>Notiz</span><input type="text" name="note" value="${esc(c.note)}"></label>
+    </div>`,
   {
     submit: isNew ? "Hinzufügen" : "Speichern",
     onSubmit: async (fd) => {
-      const body = Object.fromEntries(fd);
+      const body = { name: fd.get("name"), address: fd.get("address"), secret: fd.get("secret"), note: fd.get("note"),
+        requireMA: fd.has("requireMA"), coaPort: parseInt(fd.get("coaPort"), 10) || 0 };
       await api(isNew ? "POST" : "PUT", isNew ? "/api/clients" : "/api/clients/" + c.id, body);
       toast(isNew ? "Gerät hinzugefügt" : "Gespeichert");
       if (body.secret) setTimeout(() => copyText(body.secret), 50);
@@ -813,6 +1103,13 @@ function clientDialog(c = {}) {
     },
   });
 }
+const fetchSecret = async (id) => (await api("GET", "/api/clients/" + encodeURIComponent(id) + "/secret")).secret || "";
+ACTIONS.copySecret = async (el) => copyText(await fetchSecret(el.dataset.id));
+ACTIONS.loadSecret = async (el) => {
+  const inp = el.closest(".input-group").querySelector("input");
+  inp.value = await fetchSecret(el.dataset.id);
+  inp.type = "text";
+};
 ACTIONS.newClient = () => clientDialog();
 ACTIONS.editClient = (el) => clientDialog(clientsCache.find((c) => c.id === el.dataset.id));
 ACTIONS.deleteClient = (el) => {
@@ -829,7 +1126,7 @@ let logItems = [];
 VIEWS.protokoll = async (main) => {
   logItems = await api("GET", "/api/events?limit=1000");
   if (state.route !== "protokoll") return;
-  const chips = [["all", "Alle"], ["accept", "Angenommen"], ["reject", "Abgelehnt"], ["acct", "Sitzungen"], ["system", "System"]];
+  const chips = [["all", "Alle"], ["accept", "Angenommen"], ["reject", "Abgelehnt"], ["acct", "Sitzungen"], ["audit", "Änderungen"], ["system", "System"]];
   main.innerHTML = header("Protokoll", `<span class="badge ok"><span class="dot pulse"></span> Live</span> &nbsp;Neue Ereignisse erscheinen automatisch`,
     `<div class="search">${icon("search")}<input type="search" id="lsearch" placeholder="Benutzer, Gerät, MAC …" value="${esc(state.logSearch)}"></div>`) +
     `<div class="chips" style="margin-bottom:14px">${chips.map(([k, t]) => `<button class="chip ${state.logFilter === k ? "on" : ""}" data-action="logFilter" data-k="${k}">${t}</button>`).join("")}</div>
@@ -850,7 +1147,7 @@ function drawLog() {
   const list = logItems.filter((e) => {
     if (f === "system" && !(e.kind === "info" || e.kind === "warning")) return false;
     if (f !== "all" && f !== "system" && e.kind !== f) return false;
-    if (q && ![e.user, e.client, e.clientIp, e.station, e.message, e.method].join(" ").toLowerCase().includes(q)) return false;
+    if (q && ![e.user, e.admin, e.client, e.clientIp, e.station, e.message, e.method].join(" ").toLowerCase().includes(q)) return false;
     return true;
   }).slice(0, 400);
   el.innerHTML = list.length ? list.map((e) => eventRow(e, true)).join("")
@@ -859,8 +1156,10 @@ function drawLog() {
 
 /* ---------- Zertifikat ---------- */
 VIEWS.zertifikat = async (main) => {
-  const [c, le, dash] = await Promise.all([api("GET", "/api/cert"), api("GET", "/api/acme"), api("GET", "/api/dashboard")]);
+  const [c, le, dash, settings, ucerts] = await Promise.all([api("GET", "/api/cert"), api("GET", "/api/acme"), api("GET", "/api/dashboard"),
+    api("GET", "/api/settings").catch(() => null), api("GET", "/api/clientcerts").catch((err) => err)]);
   if (state.route !== "zertifikat") return;
+  const eapTls = !!(settings && settings.eap && settings.eap.tls);
   const days = Math.round((new Date(c.notAfter) - Date.now()) / 86400000);
   const local = /^(localhost|127\.|\[::1\])/.test(location.hostname);
   const base = local && dash.ips[0] ? `http://${dash.ips[0]}${location.port ? ":" + location.port : ""}` : location.origin;
@@ -896,8 +1195,8 @@ VIEWS.zertifikat = async (main) => {
     ${setting("globe", `Öffentliches Zertifikat ${leState}`,
       le.enabled ? `Domain <b>${esc(le.domain)}</b> · ${esc({ dns: "DNS-API", acmedns: "CNAME-Delegation", http: "HTTP (Port 80)" }[le.method] || "")}${le.lastSuccess && !le.lastSuccess.startsWith("0001") ? ` · zuletzt erneuert ${fmtRel(le.lastSuccess)}` : ""}${le.staging ? " · Testsystem" : ""}`
         : "Mit eigener Domain: Android-Geräte brauchen dann keine Zertifikat-Installation mehr („Systemzertifikate verwenden“).",
-      le.enabled ? `<button class="btn" data-action="acmeRun" ${le.running ? "disabled" : ""}>Jetzt erneuern</button><button class="btn" data-action="acmeSetup">Ändern</button>`
-        : `<button class="btn primary" data-action="acmeSetup">Einrichten</button>`)}
+      adm(le.enabled ? `<button class="btn" data-action="acmeRun" ${le.running ? "disabled" : ""}>Jetzt erneuern</button><button class="btn" data-action="acmeSetup">Ändern</button>`
+        : `<button class="btn primary" data-action="acmeSetup">Einrichten</button>`))}
     ${le.lastError ? `<div class="error-box" style="margin-top:4px"><div>${esc(le.lastError)}</div></div>` : ""}
     ${le.cnameName ? `<div class="callout warn" style="margin-top:4px"><h3>${icon("alert")} Noch ein Schritt: CNAME-Eintrag anlegen</h3>
       <p>Lege bei deinem Domain-Anbieter <b>einmalig</b> diesen DNS-Eintrag an. Danach erneuert EasyRadius das Zertifikat dauerhaft automatisch.</p>
@@ -907,16 +1206,46 @@ VIEWS.zertifikat = async (main) => {
         <dt>Ziel</dt><dd><b class="mono copy" data-action="copy" data-value="${esc(le.cnameTarget)}">${esc(le.cnameTarget)}</b></dd>
       </dl>
       <p class="muted" style="font-size:12px">Manche Anbieter wollen beim Namen nur den vorderen Teil (ohne deine Domain). Es kann einige Minuten dauern, bis der Eintrag sichtbar ist.</p>
-      <button class="btn primary" data-action="acmeRun" ${le.running ? "disabled" : ""}>Eintrag ist angelegt – jetzt prüfen</button></div>` : ""}
+      ${adm(`<button class="btn primary" data-action="acmeRun" ${le.running ? "disabled" : ""}>Eintrag ist angelegt – jetzt prüfen</button>`)}</div>` : ""}
+
+    <div class="section-title">Benutzerzertifikate (EAP-TLS)</div>
+    ${userCertsHTML(ucerts, eapTls)}
 
     <div class="section-title">Weitere Aktionen</div>
     ${c.hasCa ? setting("download", "CA-Zertifikat herunterladen", "Zum Installieren auf Endgeräten, die das Zertifikat prüfen.",
       `<a class="btn" href="/api/cert/ca.crt">Herunterladen</a>`) : ""}
-    ${!c.selfSigned ? setting("shield", "Wieder das Zertifikat der eigenen CA verwenden", "Geräte, die die EasyRadius-CA installiert haben, vertrauen ihm sofort. Let's Encrypt wird dabei ausgeschaltet.",
+    ${adm(`${!c.selfSigned ? setting("shield", "Wieder das Zertifikat der eigenen CA verwenden", "Geräte, die die EasyRadius-CA installiert haben, vertrauen ihm sofort. Let's Encrypt wird dabei ausgeschaltet.",
       `<button class="btn" data-action="certOwn">Verwenden</button>`) : ""}
     ${setting("refresh", "Komplett neu erzeugen", "Neue Zertifizierungsstelle und neues Serverzertifikat.", `<button class="btn" data-action="certGenerate">Erzeugen</button>`)}
-    ${setting("upload", "Eigenes Zertifikat verwenden", "Zertifikat und Schlüssel im PEM-Format hochladen, z. B. von deiner Firmen-CA.", `<button class="btn" data-action="certUpload">Hochladen</button>`)}`;
+    ${setting("upload", "Eigenes Zertifikat verwenden", "Zertifikat und Schlüssel im PEM-Format hochladen, z. B. von deiner Firmen-CA.", `<button class="btn" data-action="certUpload">Hochladen</button>`)}`)}`;
   if (le.running) setTimeout(() => { if (state.route === "zertifikat" && !modal.open) render(); }, 4000);
+};
+
+function userCertsHTML(list, eapTls) {
+  if (list instanceof Error) {
+    return `<div class="callout">${notAvailable(list) ? NOT_AVAILABLE + "." : `Liste nicht abrufbar: ${esc(list.message)}`}</div>`;
+  }
+  const hint = eapTls ? `Neue Zertifikate gibt es unter <a href="#/benutzer">Benutzer</a> → ${icon("shield")} „Zertifikat (EAP-TLS)“.`
+    : `EAP-TLS ist ausgeschaltet – einschalten unter <a href="#/einstellungen">Einstellungen</a> → WLAN-Verfahren.`;
+  if (!list || !list.length) return `<div class="callout">Noch keine Benutzerzertifikate ausgestellt. ${hint}</div>`;
+  return `<div class="card flush"><div class="table-wrap"><table><thead><tr><th>Benutzer</th><th>Status</th><th>Ausgestellt</th><th>Gültig bis</th><th>Seriennummer</th><th></th></tr></thead><tbody>
+    ${list.map((x) => `<tr>
+      <td>${esc(x.user)}</td>
+      <td>${x.revoked ? `<span class="badge bad">Gesperrt</span>` : isPast(x.notAfter) ? `<span class="badge">Abgelaufen</span>` : `<span class="badge ok"><span class="dot"></span>Gültig</span>`}</td>
+      <td class="muted">${fmtDay(x.created)}</td>
+      <td class="muted">${fmtDay(x.notAfter)}</td>
+      <td class="mono muted serial">${esc(x.serial)}</td>
+      <td class="actions">${x.revoked ? "" : adm(`<button class="btn sm" data-action="revokeCert" data-serial="${esc(x.serial)}" data-user="${esc(x.user)}">${icon("lock")} Sperren</button>`)}</td></tr>`).join("")}
+  </tbody></table></div></div><p class="muted" style="font-size:12px;margin-top:8px">${hint}</p>`;
+}
+ACTIONS.revokeCert = (el) => {
+  const { serial, user } = el.dataset;
+  confirmDialog("Zertifikat sperren", `Das Zertifikat von <b>${esc(user)}</b> wird gesperrt. Damit ist keine Anmeldung per EAP-TLS mehr möglich – das lässt sich nicht rückgängig machen.`, "Sperren", async () => {
+    try { await api("POST", "/api/clientcerts/" + encodeURIComponent(serial) + "/revoke"); }
+    catch (err) { throw notAvailable(err) ? new Error(NOT_AVAILABLE) : err; }
+    toast("Zertifikat gesperrt");
+    render();
+  });
 };
 
 ACTIONS.acmeRun = async () => { await api("POST", "/api/acme/run"); toast("Zertifikat wird beantragt …"); render(); };
@@ -1006,30 +1335,115 @@ function setting(ic, title, desc, ctrl) {
 VIEWS.einstellungen = async (main) => {
   const s = await api("GET", "/api/settings");
   if (state.route !== "einstellungen") return;
+  const lock = s.lockout || {}, eap = s.eap || {};
+  const toggle = (name, on, extra = "") => `<label class="switch" style="margin:0"><input type="checkbox" name="${name}" ${on ? "checked" : ""} ${extra}></label>`;
+  const httpsUrl = `https://${location.hostname}:${state.httpsPort}${location.pathname}`;
+  // „Nur HTTPS“ lässt sich nur über HTTPS oder direkt am Server einschalten.
+  const httpsLocked = !s.httpsOnly && (!s.httpsAddr || (!state.secure && !state.loopback));
   main.innerHTML = header("Einstellungen", "") + `
-    <form id="sform" novalidate><div class="msg"></div>
+    <form id="sform" novalidate><div class="msg"></div><fieldset class="plain" ${isAdmin() ? "" : "disabled"}>
       <div class="section-title" style="margin-top:0">RADIUS-Server</div>
       ${setting("router", "Servername", "Wird den Geräten bei der Anmeldung genannt.", `<input type="text" name="serverName" value="${esc(s.serverName)}">`)}
-      ${setting("key", "Authentifizierungs-Port", "UDP-Port für Anmeldungen. Standard: 1812", `<input type="number" name="authPort" value="${s.authPort}">`)}
-      ${setting("activity", "Accounting-Port", "UDP-Port für Sitzungsdaten. Standard: 1813", `<input type="number" name="acctPort" value="${s.acctPort}">`)}
-      <div class="row" style="justify-content:flex-end;margin-top:8px"><button class="btn primary" type="submit">Speichern</button></div>
-    </form>
+      ${setting("key", "Authentifizierungs-Port", "UDP-Port für Anmeldungen. Standard: 1812", `<input type="number" name="authPort" min="1" max="65535" value="${esc(s.authPort)}">`)}
+      ${setting("activity", "Accounting-Port", "UDP-Port für Sitzungsdaten. Standard: 1813", `<input type="number" name="acctPort" min="1" max="65535" value="${esc(s.acctPort)}">`)}
+
+      <div class="section-title">Schutz vor Passwort-Raten</div>
+      ${setting("lock", "Nach Fehlversuchen sperren",
+        "Wer zu oft ein falsches Passwort eingibt, wird für eine Weile gesperrt – der Benutzer und zusätzlich das Endgerät (MAC-Adresse). Aufheben lässt sich eine Sperre unter <a href=\"#/sitzungen\">Sitzungen</a>.",
+        toggle("lockEnabled", lock.enabled))}
+      ${setting("alert", "Fehlversuche bis zur Sperre", "3 bis 100. Gezählt wird innerhalb der Sperrdauer.", `<input type="number" name="lockAttempts" min="3" max="100" value="${esc(lock.attempts || 10)}">`)}
+      ${setting("refresh", "Sperrdauer in Minuten", "1 bis 1440 (ein Tag).", `<input type="number" name="lockMinutes" min="1" max="1440" value="${esc(lock.minutes || 15)}">`)}
+
+      <div class="section-title">WLAN-Verfahren</div>
+      ${setting("wifi", "PEAP (MSCHAPv2)", "Immer an – funktioniert mit Windows, Android, iPhone und Mac.", `<span class="badge ok">an</span>`)}
+      ${setting("key", "EAP-TTLS zusätzlich anbieten",
+        "Für Linux, Android und Apple-Profile, die TTLS bevorzugen (innen PAP oder MSCHAPv2). PEAP bleibt daneben aktiv.", toggle("eapTtls", eap.ttls))}
+      ${setting("shield", "EAP-TLS (Benutzerzertifikate)",
+        "Anmeldung mit einem Zertifikat statt Passwort. Zertifikate stellst du unter Benutzer aus; dafür muss EasyRadius die eigene Zertifizierungsstelle verwenden.", toggle("eapTls", eap.tls))}
+
+      <div class="section-title">Weboberfläche</div>
+      ${setting("globe", "Aus dem Netz nur HTTPS erlauben",
+        `Unverschlüsselte Aufrufe von anderen Rechnern werden auf <span class="mono">${esc(httpsUrl)}</span> umgeleitet. Die Einrichtungsseite <span class="mono">/einrichten</span> bleibt auch per HTTP erreichbar, damit Handys sie ohne Zertifikatswarnung öffnen können.
+         ${httpsLocked ? `<br><b>Einschalten geht nur über eine HTTPS-Verbindung oder direkt am Server.</b>` : ""}`,
+        toggle("httpsOnly", s.httpsOnly, httpsLocked ? "disabled" : ""))}
+      ${setting("list", "Protokoll-Einträge behalten", "So viele Ereignisse hebt das Protokoll auf (100 bis 100000). Ältere werden gelöscht.",
+        `<input type="number" name="logRetention" min="100" max="100000" step="100" value="${esc(s.logRetention || 5000)}">`)}
+      ${adm(`<div class="row" style="justify-content:flex-end;margin-top:8px"><button class="btn primary" type="submit">Speichern</button></div>`)}
+    </fieldset></form>
+
+    ${adm(`<div class="section-title">Sicherung</div>
+    ${setting("download", "Sicherung herunterladen",
+      "Eine verschlüsselte Datei mit allen Einstellungen, Benutzern, Geräten, Secrets und Zertifikaten. Ohne das Passwort ist sie wertlos – gut merken.",
+      `<button class="btn" data-action="backup">Herunterladen</button>`)}
+    ${setting("upload", "Sicherung wiederherstellen",
+      "Ersetzt alles durch den Stand der Sicherung. Danach müssen sich alle neu anmelden.",
+      `<button class="btn" data-action="restore">Wiederherstellen</button>`)}`)}
+
     <div class="section-title">Konto</div>
-    ${setting("users", "Administrator", `Angemeldet als ${esc(s.adminUser)}`, `<button class="btn" data-action="changePw">Passwort ändern</button>`)}
+    ${setting("users", esc(state.user), `Angemeldet${isAdmin() ? " als Administrator" : " – nur lesen"}`, `<button class="btn" data-action="changePw">Passwort ändern</button>`)}
+    ${setting("devices", "Überall abmelden", "Beendet alle Anmeldungen dieses Kontos – auf allen Rechnern und in allen Browsern.", `<button class="btn" data-action="logoutAll">Überall abmelden</button>`)}
     ${setting("logout", "Abmelden", "Von der Verwaltungsoberfläche abmelden.", `<button class="btn" data-action="logout">Abmelden</button>`)}
     <div class="section-title">Info</div>
-    ${setting("info", "EasyRadius", `Version ${esc(state.version)} · Weboberfläche ${esc(location.origin)}`, "")}
-    ${setting("wifi", "Unterstützte Verfahren", "WPA2/WPA3-Enterprise (PEAP-MSCHAPv2), PAP, MS-CHAPv2, VLAN-Zuweisung, Accounting", "")}`;
+    ${setting("info", "EasyRadius", `Version ${esc(state.version)} · Weboberfläche ${esc(location.origin)}${s.httpsAddr && !state.secure ? ` · HTTPS auf Port ${esc(state.httpsPort)}` : ""}`, "")}
+    ${setting("wifi", "Unterstützte Verfahren", "WPA2/WPA3-Enterprise (PEAP, EAP-TTLS, EAP-TLS), PAP, MS-CHAPv2, MAC-Authentifizierung, VLAN-Zuweisung, Accounting, Sitzung trennen (RFC 5176)", "")}`;
   const sf = $("#sform");
   sf.onsubmit = async (e) => {
     e.preventDefault();
-    const d = Object.fromEntries(new FormData(sf));
+    const fd = new FormData(sf);
+    const num = (k) => parseInt(fd.get(k), 10) || 0;
+    const body = {
+      serverName: fd.get("serverName"), authPort: num("authPort"), acctPort: num("acctPort"),
+      httpsOnly: sf.httpsOnly.checked, logRetention: num("logRetention"),
+      lockout: { enabled: fd.has("lockEnabled"), attempts: num("lockAttempts"), minutes: num("lockMinutes") },
+      eap: { ttls: fd.has("eapTtls"), tls: fd.has("eapTls") },
+    };
     try {
-      await api("PUT", "/api/settings", { serverName: d.serverName, authPort: +d.authPort, acctPort: +d.acctPort });
-      state.server = d.serverName; $(".msg", sf).innerHTML = ""; toast("Einstellungen gespeichert");
-    } catch (err) { $(".msg", sf).innerHTML = `<div class="error-box">${esc(err.message)}</div>`; }
+      await api("PUT", "/api/settings", body);
+      state.server = body.serverName; $(".msg", sf).innerHTML = ""; toast("Einstellungen gespeichert");
+    } catch (err) {
+      $(".msg", sf).innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+      $(".msg", sf).scrollIntoView({ block: "nearest" });
+    }
   };
 };
+
+ACTIONS.backup = () => openModal("Sicherung herunterladen", `
+  <p class="muted">Die Datei enthält alle Secrets und Schlüssel und wird mit diesem Passwort verschlüsselt. Ohne das Passwort lässt sie sich nicht wiederherstellen.</p>
+  <label class="f"><span>Passwort für die Sicherung</span><input type="password" name="password" autocomplete="new-password"><small>Mindestens 8 Zeichen.</small></label>
+  <label class="f"><span>Passwort wiederholen</span><input type="password" name="password2" autocomplete="new-password"></label>`,
+{
+  submit: "Herunterladen",
+  onSubmit: async (fd) => {
+    const pw = String(fd.get("password") || "");
+    if (pw.length < 8) throw new Error("Das Passwort braucht mindestens 8 Zeichen.");
+    if (pw !== fd.get("password2")) throw new Error("Die Passwörter stimmen nicht überein.");
+    const d = new Date();
+    const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    await download("/api/backup", { password: pw }, `EasyRadius-Sicherung-${day}.erbackup`);
+    toast("Sicherung heruntergeladen");
+  },
+});
+
+ACTIONS.restore = () => openModal("Sicherung wiederherstellen", `
+  <div class="callout warn"><h3>${icon("alert")} Alles wird ersetzt</h3>
+    Einstellungen, Benutzer, Gruppen, Geräte, MAC-Adressen, Konten und Zertifikate werden durch den Stand der Sicherung überschrieben. Danach müssen sich alle neu anmelden.</div>
+  <label class="f"><span>Sicherungsdatei</span><input type="file" name="file" accept=".erbackup"></label>
+  <label class="f"><span>Passwort der Sicherung</span><input type="password" name="password" autocomplete="off"></label>`,
+{
+  submit: "Wiederherstellen",
+  danger: true,
+  onSubmit: async (fd) => {
+    const f = fd.get("file");
+    if (!f || !f.size) throw new Error("Bitte die Sicherungsdatei auswählen.");
+    if (!fd.get("password")) throw new Error("Bitte das Passwort der Sicherung eingeben.");
+    await api("POST", "/api/restore", fd);
+    modal.close();
+    state.user = ""; location.hash = "";
+    try { applyState(await api("GET", "/api/state")); } catch { /* Anmeldung kommt trotzdem */ }
+    render();
+    toast("Sicherung wiederhergestellt – bitte neu anmelden");
+  },
+});
 ACTIONS.changePw = () => openModal("Passwort ändern", `
   <label class="f"><span>Aktuelles Passwort</span><input type="password" name="current" autocomplete="current-password"></label>
   <label class="f"><span>Neues Passwort</span><input type="password" name="new" autocomplete="new-password"><small>Mindestens 8 Zeichen.</small></label>
@@ -1043,6 +1457,241 @@ ACTIONS.changePw = () => openModal("Passwort ändern", `
     toast("Passwort geändert");
   },
 });
+
+ACTIONS.reloadView = () => render();
+
+/* ---------- Sitzungen, Accounting, Sperren ---------- */
+VIEWS.sitzungen = async (main) => {
+  const month = state.acctMonth ? "?month=" + encodeURIComponent(state.acctMonth) : "";
+  const [online, acct, locks] = await Promise.all([api("GET", "/api/online"), api("GET", "/api/accounting" + month), api("GET", "/api/lockouts")]);
+  if (state.route !== "sitzungen") return;
+  state.online = online || [];
+  state.locks = locks || [];
+  main.innerHTML = header("Sitzungen", "Wer gerade verbunden ist, wer wann online war und wer gesperrt ist",
+    `<button class="btn" data-action="reloadView">${icon("refresh")} Aktualisieren</button>`) + `
+    <div class="section-title" style="margin-top:0">Jetzt verbunden</div>
+    <div id="onlinebox"></div>
+    <div class="section-title">Gesperrt nach Fehlversuchen</div>
+    <div id="lockbox"></div>
+    <div class="section-title">Abgeschlossene Sitzungen</div>
+    <div id="acctbox"></div>`;
+  drawOnline();
+  drawLocks();
+  drawAcct(acct);
+};
+
+function drawOnline() {
+  const list = state.online;
+  $("#onlinebox").innerHTML = list.length ? `<div class="card flush"><div class="table-wrap"><table>
+    <thead><tr><th>Benutzer</th><th>Endgerät</th><th>Über</th><th>Seit</th><th>Empfangen / Gesendet</th><th></th></tr></thead><tbody>
+    ${list.map((o) => `<tr>
+      <td><b>${esc(o.user || "?")}</b></td>
+      <td><div class="who"><span class="mono">${esc(o.station || "–")}</span>${o.ip ? `<small>${esc(o.ip)}</small>` : ""}</div></td>
+      <td><div class="who">${esc(o.client || "–")}${o.nasAddr ? `<small class="mono">${esc(o.nasAddr)}</small>` : ""}</div></td>
+      <td title="${esc(fmtDate(o.started))}">${fmtRel(o.started)}</td>
+      <td class="muted">${fmtBytes(o.inBytes || 0)} / ${fmtBytes(o.outBytes || 0)}</td>
+      <td class="actions">${adm(`<button class="btn sm" data-action="disconnect" data-key="${esc(o.key)}">${icon("power")} Trennen</button>`)}</td>
+    </tr>`).join("")}</tbody></table></div></div>
+    <p class="muted" style="font-size:12px;margin-top:8px">„Trennen“ schickt dem Access Point oder Switch eine Disconnect-Anfrage (RFC 5176) an den CoA-Port des Geräts (Standard 3799). Das Gerät muss das unterstützen und eingeschaltet haben.</p>`
+    : `<div class="callout">Keine aktiven Sitzungen bekannt. Damit Sitzungen erscheinen, am Access Point RADIUS-Accounting einschalten.</div>`;
+}
+
+function drawLocks() {
+  const list = state.locks;
+  const until = (s) => { const d = new Date(s); return d.toDateString() === new Date().toDateString() ? fmtTime(s) + " Uhr" : fmtDate(s); };
+  $("#lockbox").innerHTML = list.length ? `<div class="card flush"><div class="table-wrap"><table>
+    <thead><tr><th>Gesperrt</th><th>Art</th><th>Bis</th><th class="actions">${adm(`<button class="btn sm" data-action="unlockAll">${icon("unlock")} Alle entsperren</button>`)}</th></tr></thead><tbody>
+    ${list.map((l) => `<tr>
+      <td class="${l.kind === "station" ? "mono" : ""}">${esc(l.name)}</td>
+      <td>${l.kind === "station" ? "Endgerät" : "Benutzer"}</td>
+      <td>${esc(until(l.until))}</td>
+      <td class="actions">${adm(`<button class="btn sm" data-action="unlock" data-key="${esc(l.key)}">${icon("unlock")} Entsperren</button>`)}</td>
+    </tr>`).join("")}</tbody></table></div></div>`
+    : `<div class="callout">Derzeit ist niemand gesperrt.</div>`;
+}
+
+function drawAcct(a) {
+  a = a || {};
+  const box = $("#acctbox");
+  if (!box) return;
+  const months = (a.months || []).slice();
+  if (a.month && !months.includes(a.month)) months.unshift(a.month);
+  if (!months.length) {
+    box.innerHTML = `<div class="callout">Noch keine abgeschlossenen Sitzungen aufgezeichnet. Dafür am Access Point RADIUS-Accounting einschalten.</div>`;
+    return;
+  }
+  const recs = (a.records || []).slice().sort((x, y) => new Date(y.stop || y.start) - new Date(x.stop || x.start));
+  const shown = recs.slice(0, 500);
+  const secs = recs.reduce((n, r) => n + (r.seconds || 0), 0);
+  const bytes = recs.reduce((n, r) => n + (r.inBytes || 0) + (r.outBytes || 0), 0);
+  box.innerHTML = `
+    <div class="row" style="margin-bottom:8px">
+      <select id="acctmonth" class="auto">${months.map((m) => `<option value="${esc(m)}" ${m === a.month ? "selected" : ""}>${esc(fmtMonth(m))}</option>`).join("")}</select>
+      <a class="btn" href="/api/accounting.csv?month=${encodeURIComponent(a.month || months[0])}" download>${icon("download")} CSV-Export</a>
+      <span class="muted">${recs.length} Sitzung${recs.length === 1 ? "" : "en"} · ${fmtDur(secs)} · ${fmtBytes(bytes)}</span>
+    </div>
+    ${recs.length ? `<div class="card flush"><div class="table-wrap"><table>
+      <thead><tr><th>Benutzer</th><th>Endgerät</th><th>Über</th><th>Beginn</th><th>Dauer</th><th>Empfangen / Gesendet</th><th>Grund</th></tr></thead><tbody>
+      ${shown.map((r) => `<tr>
+        <td>${esc(r.user || "?")}</td>
+        <td><div class="who"><span class="mono">${esc(r.station || "–")}</span>${r.ip ? `<small>${esc(r.ip)}</small>` : ""}</div></td>
+        <td>${esc(r.client || "–")}</td>
+        <td class="muted">${fmtDate(r.start)}</td>
+        <td>${fmtDur(r.seconds)}</td>
+        <td class="muted">${fmtBytes(r.inBytes || 0)} / ${fmtBytes(r.outBytes || 0)}</td>
+        <td class="muted">${esc(r.cause || "")}</td>
+      </tr>`).join("")}</tbody></table></div></div>
+      ${recs.length > shown.length ? `<p class="muted" style="font-size:12px;margin-top:8px">Angezeigt werden die neuesten ${shown.length} – alle stehen im CSV-Export.</p>` : ""}`
+    : `<div class="callout">In diesem Monat keine abgeschlossenen Sitzungen.</div>`}`;
+  $("#acctmonth").onchange = async (e) => {
+    state.acctMonth = e.target.value;
+    try { drawAcct(await api("GET", "/api/accounting?month=" + encodeURIComponent(state.acctMonth))); }
+    catch (err) { toast(err.message, true); }
+  };
+}
+
+ACTIONS.disconnect = (el) => {
+  const key = el.dataset.key;
+  const o = state.online.find((x) => x.key === key) || {};
+  confirmDialog("Sitzung trennen", `Soll die Sitzung von <b>${esc(o.user || "?")}</b>${o.station ? ` (<span class="mono">${esc(o.station)}</span>)` : ""} getrennt werden?
+    Das Endgerät verbindet sich danach meist sofort neu – zum dauerhaften Aussperren den Benutzer deaktivieren.`, "Trennen", async () => {
+    await api("POST", "/api/online/disconnect", { key });
+    toast("Sitzung getrennt");
+    VIEWS.sitzungen($(".main"));
+  });
+};
+async function unlock(key) {
+  await api("POST", "/api/lockouts/unlock", { key });
+  toast(key ? "Sperre aufgehoben" : "Alle Sperren aufgehoben");
+  if (state.route === "sitzungen") VIEWS.sitzungen($(".main"));
+}
+ACTIONS.unlock = (el) => unlock(el.dataset.key);
+ACTIONS.unlockAll = () => unlock("");
+
+/* ---------- Konten und API-Tokens ---------- */
+let adminsCache = [], tokensCache = [];
+const roleBadge = (r) => (r === "viewer" ? `<span class="badge">Nur lesen</span>` : `<span class="badge info">Administrator</span>`);
+const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+
+VIEWS.konten = async (main) => {
+  if (!isAdmin()) {
+    main.innerHTML = header("Konten", "") + `<div class="callout">Konten und API-Tokens können nur Administratoren verwalten.</div>`;
+    return;
+  }
+  [adminsCache, tokensCache] = await Promise.all([api("GET", "/api/admins"), api("GET", "/api/tokens")]);
+  if (state.route !== "konten") return;
+  const host = `https://${location.hostname}:${state.httpsPort}`;
+  const today = todayISO();
+  main.innerHTML = header("Konten", "Wer die Weboberfläche benutzen darf – und Zugänge für Skripte",
+    `<button class="btn primary" data-action="newAdmin">${icon("plus")} Konto hinzufügen</button>`) + `
+    <div class="card flush"><div class="table-wrap"><table>
+      <thead><tr><th>Benutzername</th><th>Rolle</th><th>Letzte Anmeldung</th><th>Angelegt</th><th></th></tr></thead><tbody>
+      ${adminsCache.map((a) => `<tr>
+        <td>${esc(a.username)} ${a.self ? `<span class="badge ok" title="Mit diesem Konto bist du angemeldet">Du</span>` : ""}</td>
+        <td>${roleBadge(a.role)}</td>
+        <td class="muted">${fmtRel(a.lastLogin)}</td>
+        <td class="muted">${fmtDay(a.createdAt)}</td>
+        <td class="actions"><button class="btn ghost sm" data-action="editAdmin" data-id="${esc(a.id)}" title="Bearbeiten">${icon("edit")}</button>
+          ${a.self ? "" : `<button class="btn ghost sm" data-action="deleteAdmin" data-id="${esc(a.id)}" title="Löschen">${icon("trash")}</button>`}</td>
+      </tr>`).join("")}</tbody></table></div></div>
+    <p class="muted" style="font-size:12px;margin-top:8px"><b>Administrator</b> darf alles. <b>Nur lesen</b> sieht Benutzer, Geräte, Sitzungen und Protokoll, kann aber nichts ändern und keine Secrets abrufen.</p>
+
+    <div class="section-title row" style="justify-content:space-between"><span>API-Tokens</span>
+      <button class="btn sm" data-action="newToken">${icon("plus")} Token erstellen</button></div>
+    ${tokensCache.length ? `<div class="card flush"><div class="table-wrap"><table>
+      <thead><tr><th>Name</th><th>Token</th><th>Rolle</th><th>Erstellt</th><th>Zuletzt benutzt</th><th>Läuft ab</th><th></th></tr></thead><tbody>
+      ${tokensCache.map((t) => `<tr>
+        <td>${esc(t.name)}</td>
+        <td class="mono muted">${esc(t.prefix)}…</td>
+        <td>${roleBadge(t.role)}</td>
+        <td><div class="who">${fmtDay(t.createdAt)}${t.createdBy ? `<small>von ${esc(t.createdBy)}</small>` : ""}</div></td>
+        <td class="muted">${fmtRel(t.lastUsed)}</td>
+        <td>${!t.expiresAt ? `<span class="muted">nie</span>` : t.expiresAt < today ? `<span class="badge bad">abgelaufen</span>` : esc(fmtDay(t.expiresAt))}</td>
+        <td class="actions"><button class="btn ghost sm" data-action="deleteToken" data-id="${esc(t.id)}" title="Löschen">${icon("trash")}</button></td>
+      </tr>`).join("")}</tbody></table></div></div>`
+    : `<div class="callout">Noch keine API-Tokens. Damit können Skripte die API ohne Passwort benutzen.</div>`}
+    <div class="callout" style="margin-top:12px"><h3>${icon("info")} So benutzt du ein Token</h3>
+      <p>Das Token im Header <span class="mono">Authorization</span> mitschicken, zum Beispiel:</p>
+      <pre class="code">curl -H "Authorization: Bearer er_…" ${esc(host)}/api/users</pre>
+      <p class="muted" style="margin:0;font-size:12px">Ein Token mit „Nur lesen“ darf nur abfragen. Bei einem Zertifikat der eigenen CA zusätzlich <span class="mono">--cacert ca.crt</span> angeben.</p></div>`;
+};
+
+function adminDialog(a = { role: "admin" }) {
+  const isNew = !a.id;
+  openModal(isNew ? "Konto hinzufügen" : "Konto bearbeiten", `
+    <label class="f"><span>Benutzername</span><input type="text" name="username" value="${esc(a.username)}" autocomplete="off"></label>
+    <label class="f"><span>Rolle</span><select name="role">
+      <option value="admin" ${a.role !== "viewer" ? "selected" : ""}>Administrator</option>
+      <option value="viewer" ${a.role === "viewer" ? "selected" : ""}>Nur lesen</option></select>
+      <small>„Nur lesen“ sieht fast alles, kann aber nichts ändern.</small></label>
+    <label class="f"><span>${isNew ? "Passwort" : "Neues Passwort"}</span>
+      <div class="input-group"><input type="password" name="password" autocomplete="new-password" placeholder="${isNew ? "" : "leer lassen = unverändert"}">
+      <button type="button" class="btn" data-action="reveal" title="Anzeigen">${icon("eye")}</button>
+      <button type="button" class="btn" data-action="genpw" title="Zufällig erzeugen">${icon("dice")}</button></div>
+      <small>8 bis 72 Zeichen.${isNew ? "" : " Neues Passwort oder andere Rolle: Das Konto wird überall abgemeldet."}</small></label>`,
+  {
+    submit: isNew ? "Anlegen" : "Speichern",
+    onSubmit: async (fd) => {
+      const username = String(fd.get("username") || "").trim();
+      const role = fd.get("role"), password = String(fd.get("password") || "");
+      if (!username) throw new Error("Bitte einen Benutzernamen eingeben.");
+      if (isNew && !password) throw new Error("Bitte ein Passwort vergeben.");
+      const roleChanged = !isNew && role !== a.role;
+      // Rolle nur mitschicken, wenn sie sich ändert – sonst beendet der Server die Sitzungen des Kontos.
+      await api(isNew ? "POST" : "PUT", isNew ? "/api/admins" : "/api/admins/" + a.id,
+        { username, role: isNew || roleChanged ? role : "", password });
+      toast(isNew ? "Konto angelegt" : "Gespeichert");
+      if (a.self && (password || roleChanged)) { state.user = ""; location.hash = ""; render(); return; }
+      if (a.self && username !== state.user) { state.user = username; app.innerHTML = ""; }
+      render();
+    },
+  });
+}
+ACTIONS.newAdmin = () => adminDialog();
+ACTIONS.editAdmin = (el) => adminDialog(adminsCache.find((a) => a.id === el.dataset.id));
+ACTIONS.deleteAdmin = (el) => {
+  const a = adminsCache.find((x) => x.id === el.dataset.id);
+  if (!a) return;
+  confirmDialog("Konto löschen", `Soll das Konto <b>${esc(a.username)}</b> gelöscht werden? Es wird sofort abgemeldet.`, "Löschen", async () => {
+    await api("DELETE", "/api/admins/" + a.id);
+    toast("Konto gelöscht");
+    render();
+  });
+};
+
+ACTIONS.newToken = () => openModal("API-Token erstellen", `
+  <label class="f"><span>Name</span><input type="text" name="name" placeholder="z. B. Benutzer-Abgleich" autocomplete="off"><small>Wofür das Token gedacht ist.</small></label>
+  <label class="f"><span>Rolle</span><select name="role"><option value="viewer">Nur lesen</option><option value="admin">Administrator</option></select></label>
+  <label class="f"><span>Gültig bis <span class="muted">(optional)</span></span><input type="date" name="expiresAt"><small>Leer = unbegrenzt.</small></label>`,
+{
+  submit: "Erstellen",
+  onSubmit: async (fd) => {
+    const name = String(fd.get("name") || "").trim();
+    if (!name) throw new Error("Bitte einen Namen eingeben.");
+    const t = await api("POST", "/api/tokens", { name, role: fd.get("role"), expiresAt: fd.get("expiresAt") || "" });
+    VIEWS.konten($(".main"));
+    showToken(t);
+    return true;
+  },
+});
+
+function showToken(t) {
+  openModal("Token erstellt", `
+    <div class="ok-box">Das Token wird nur jetzt angezeigt. Kopiere es und bewahre es sicher auf – später lässt es sich nicht mehr anzeigen.</div>
+    <div class="tokenbox mono">${esc(t.token)}</div>
+    <div class="row" style="margin-top:12px"><button type="button" class="btn primary" data-action="copy" data-value="${esc(t.token)}">${icon("copy")} Kopieren</button>
+      <span class="muted">${esc(t.name)} · ${t.role === "viewer" ? "Nur lesen" : "Administrator"}</span></div>`, {});
+}
+
+ACTIONS.deleteToken = (el) => {
+  const t = tokensCache.find((x) => x.id === el.dataset.id);
+  if (!t) return;
+  confirmDialog("Token löschen", `Soll das Token <b>${esc(t.name)}</b> gelöscht werden? Skripte, die es benutzen, verlieren sofort den Zugriff.`, "Löschen", async () => {
+    await api("DELETE", "/api/tokens/" + t.id);
+    toast("Token gelöscht");
+    render();
+  });
+};
 
 /* Übersicht regelmäßig aktualisieren */
 setInterval(() => { if (state.user && state.route === "uebersicht" && !modal.open && document.visibilityState === "visible") VIEWS.uebersicht($(".main")); }, 15000);

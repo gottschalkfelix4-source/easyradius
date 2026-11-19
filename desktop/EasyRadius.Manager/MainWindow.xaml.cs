@@ -8,7 +8,9 @@ public partial class MainWindow : FluentWindow
     public MainWindow()
     {
         InitializeComponent();
-        Bar.Title = $"EasyRadius – {App.Api.BaseUri.Authority}";
+        Bar.Title = $"EasyRadius – {App.Api.BaseUri.Authority}" + (App.CanWrite ? "" : " – Nur-Lese-Zugang");
+        // Konten verwalten dürfen nur Administratoren.
+        if (!App.CanWrite) AccountsItem.Visibility = System.Windows.Visibility.Collapsed;
         Title = Bar.Title;
         Loaded += (_, _) =>
         {

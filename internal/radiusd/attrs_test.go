@@ -45,7 +45,7 @@ func TestReplyAttributes(t *testing.T) {
 	}
 	r := papReq(t, "netadmin", "pw-na", "")
 	if r.Code != radius.CodeAccessAccept {
-		t.Fatalf("%v %s", r.Code, rfc2865.ReplyMessage_GetString(r))
+		t.Fatalf("%v %s", r.Code, reason(r))
 	}
 	if st := rfc2865.ServiceType_Get(r); st != rfc2865.ServiceType_Value_AdministrativeUser {
 		t.Errorf("Service-Type = %v", st)

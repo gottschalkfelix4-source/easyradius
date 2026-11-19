@@ -59,15 +59,18 @@ func (s *Server) saveGroup(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, err.Error())
 		return
 	}
+	s.audit(r, "Gruppe „"+saved.Name+"“ gespeichert")
 	writeJSON(w, 200, saved)
 }
 
 func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request) {
+	g, _ := s.Store.Group(r.PathValue("id"))
 	if err := s.Store.DeleteGroup(r.PathValue("id")); err != nil {
 		fail(w, 404, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]bool{"ok": true})
+	s.audit(r, "Gruppe „"+g.Name+"“ gelöscht")
+	ok(w)
 }
 
 // ---- Active Directory ----
@@ -124,7 +127,7 @@ func (s *Server) putAD(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.Store.UpdateSettings(func(c *store.Settings) {
+	if err := s.Store.UpdateSettings(func(c *store.Settings) {
 		a := &c.AD
 		a.Mode, a.RequireGroup = in.Mode, in.RequireGroup
 		a.LDAPURL, a.StartTLS, a.SkipVerify = in.LDAPURL, in.StartTLS, in.SkipVerify
@@ -136,15 +139,18 @@ func (s *Server) putAD(w http.ResponseWriter, r *http.Request) {
 		if a.UserAttribute == "" {
 			a.UserAttribute = "sAMAccountName"
 		}
-	})
-	s.Log.Add(events.Event{Kind: events.Info, Message: "AD-Anbindung geändert (Modus: " + in.Mode + ")"})
+	}); err != nil {
+		fail(w, 500, err.Error())
+		return
+	}
+	s.audit(r, "AD-Anbindung geändert (Modus: "+in.Mode+")")
 	s.getAD(w, r)
 }
 
 // testLogin prüft lokale und AD-Konten wie bei einer echten Anmeldung.
 func (s *Server) testLogin(w http.ResponseWriter, r *http.Request) {
 	var in struct{ Username, Password string }
-	if readJSON(r, &in) != nil || in.Username == "" {
+	if readJSON(r, &in) != nil || strings.TrimSpace(in.Username) == "" {
 		fail(w, 400, "Benutzername fehlt")
 		return
 	}
@@ -232,7 +238,7 @@ func (s *Server) putACME(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.Store.UpdateSettings(func(c *store.Settings) {
+	if err := s.Store.UpdateSettings(func(c *store.Settings) {
 		a := &c.ACME
 		if a.Domain != in.Domain || a.Method != in.Method {
 			a.CNAMEName, a.CNAMETarget = "", ""
@@ -245,7 +251,11 @@ func (s *Server) putACME(w http.ResponseWriter, r *http.Request) {
 			a.AccountKey = "" // anderes Let's-Encrypt-System, neues Konto
 		}
 		a.LastAttempt, a.LastError = time.Time{}, ""
-	})
+	}); err != nil {
+		fail(w, 500, err.Error())
+		return
+	}
+	s.audit(r, "Let's-Encrypt-Einstellungen geändert")
 	if in.Enabled {
 		s.ACME.Start()
 	}
@@ -267,11 +277,14 @@ func (s *Server) runACME(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) certOwnCA(w http.ResponseWriter, r *http.Request) {
-	s.Store.UpdateSettings(func(c *store.Settings) { c.ACME.Enabled = false })
 	if err := s.Certs.UseOwnCA(s.Store.Settings().ServerName); err != nil {
 		fail(w, 500, err.Error())
 		return
 	}
-	s.Log.Add(events.Event{Kind: events.Info, Message: "Zurück zum Zertifikat der eigenen CA"})
+	// Erst nach Erfolg Let's Encrypt abschalten – sonst stünde man ohne beides da.
+	s.Store.UpdateSettings(func(c *store.Settings) { c.ACME.Enabled = false })
+	s.audit(r, "Zurück zum Zertifikat der eigenen CA")
 	writeJSON(w, 200, s.Certs.Info())
 }
+
+func eventWarn(msg string) events.Event { return events.Event{Kind: events.Warning, Message: msg} }

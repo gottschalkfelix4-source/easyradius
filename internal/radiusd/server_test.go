@@ -51,6 +51,7 @@ func setup(t *testing.T) *Server {
 	st.SaveUser(store.User{Username: "alice", NTHash: hex.EncodeToString(auth.NTHash("Geheim123!")), Enabled: true, VLAN: "20"})
 	st.SaveUser(store.User{Username: "bob", NTHash: hex.EncodeToString(auth.NTHash("x")), Enabled: false})
 	s := New(st, lg, cm)
+	testServer = s
 	if err := s.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -59,6 +60,22 @@ func setup(t *testing.T) *Server {
 }
 
 var lastReq *radius.Packet
+
+var testServer *Server
+
+// reason liefert den Ablehnungsgrund aus dem Protokoll – nach außen geht nur
+// eine allgemeine Meldung.
+func reason(r *radius.Packet) string {
+	if r.Code != radius.CodeAccessReject || testServer == nil {
+		return rfc2865.ReplyMessage_GetString(r)
+	}
+	for _, e := range testServer.Log.Recent(10) {
+		if e.Kind == events.Reject {
+			return e.Message
+		}
+	}
+	return ""
+}
 
 func exchange(t *testing.T, p *radius.Packet) *radius.Packet {
 	t.Helper()

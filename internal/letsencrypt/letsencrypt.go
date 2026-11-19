@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -114,19 +115,33 @@ func (u *user) GetPrivateKey() crypto.PrivateKey        { return u.key }
 // lego liest Zugangsdaten aus Umgebungsvariablen – während des Aufbaus exklusiv setzen.
 var envMu sync.Mutex
 
-func withEnv(vars map[string]string, fn func() (challenge.Provider, error)) (challenge.Provider, error) {
+// Nur die übergebenen Namen (Felder des Anbieters) werden gesetzt; vorherige Werte
+// werden danach wiederhergestellt. So lassen sich keine fremden Variablen wie PATH
+// oder HTTPS_PROXY über die Weboberfläche verändern.
+func withEnv(vars map[string]string, allowed []string, fn func() (challenge.Provider, error)) (challenge.Provider, error) {
 	envMu.Lock()
 	defer envMu.Unlock()
-	var set []string
-	for k, v := range vars {
-		if v = strings.TrimSpace(v); v != "" {
-			os.Setenv(k, v)
-			set = append(set, k)
+	type prev struct {
+		val string
+		ok  bool
+	}
+	saved := map[string]prev{}
+	for _, k := range allowed {
+		v, ok := os.LookupEnv(k)
+		saved[k] = prev{v, ok}
+		if nv := strings.TrimSpace(vars[k]); nv != "" {
+			os.Setenv(k, nv)
+		} else {
+			os.Unsetenv(k)
 		}
 	}
 	defer func() {
-		for _, k := range set {
-			os.Unsetenv(k)
+		for k, p := range saved {
+			if p.ok {
+				os.Setenv(k, p.val)
+			} else {
+				os.Unsetenv(k)
+			}
 		}
 	}()
 	return fn()
@@ -139,7 +154,11 @@ func (c *Config) provider() (challenge.Provider, error) {
 		if !ok {
 			return nil, errors.New("Bitte einen DNS-Anbieter auswählen")
 		}
-		prov, err := withEnv(c.Credentials, p.new)
+		var allowed []string
+		for _, f := range p.Fields {
+			allowed = append(allowed, f.Env)
+		}
+		prov, err := withEnv(c.Credentials, allowed, p.new)
 		if err != nil {
 			return nil, fmt.Errorf("%s: Zugangsdaten unvollständig oder ungültig (%v)", p.Name, err)
 		}
@@ -149,10 +168,12 @@ func (c *Config) provider() (challenge.Provider, error) {
 		if base == "" {
 			base = DefaultACMEDNS
 		}
-		return withEnv(map[string]string{
+		vars := map[string]string{
 			"ACME_DNS_API_BASE":     base,
-			"ACME_DNS_STORAGE_PATH": c.DataDir + `\acme-dns-accounts.json`,
-		}, func() (challenge.Provider, error) { return acmedns.NewDNSProvider() })
+			"ACME_DNS_STORAGE_PATH": filepath.Join(c.DataDir, "acme-dns-accounts.json"),
+		}
+		return withEnv(vars, []string{"ACME_DNS_API_BASE", "ACME_DNS_STORAGE_PATH"},
+			func() (challenge.Provider, error) { return acmedns.NewDNSProvider() })
 	}
 	return nil, errors.New("unbekannte Methode")
 }
@@ -194,7 +215,7 @@ func Obtain(c Config) (*Result, error) {
 	} else {
 		prov, err := c.provider()
 		if err != nil {
-			return nil, err
+			return nil, redact(err, c.Credentials)
 		}
 		// Öffentliche DNS-Server fragen – interne DNS-Server kennen die Zone oft anders.
 		if err := client.Challenge.SetDNS01Provider(prov,
@@ -214,7 +235,7 @@ func Obtain(c Config) (*Result, error) {
 		if errors.As(err, &cnp) {
 			return &Result{AccountKey: keyPEM}, &CNAMERequired{Name: strings.TrimSuffix(cnp.FQDN, "."), Target: strings.TrimSuffix(cnp.Target, ".")}
 		}
-		return &Result{AccountKey: keyPEM}, friendly(err, c.Method)
+		return &Result{AccountKey: keyPEM}, redact(friendly(err, c.Method), c.Credentials)
 	}
 	return &Result{CertPEM: res.Certificate, KeyPEM: res.PrivateKey, AccountKey: keyPEM}, nil
 }
@@ -233,6 +254,23 @@ func friendly(err error, method string) error {
 		return fmt.Errorf("Der DNS-Eintrag wurde nicht rechtzeitig sichtbar. (%s)", short(msg))
 	}
 	return fmt.Errorf("Zertifikat konnte nicht ausgestellt werden: %s", short(msg))
+}
+
+// redact entfernt Zugangsdaten aus Fehlermeldungen (sie landen im Protokoll und in der Oberfläche).
+func redact(err error, creds map[string]string) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	for _, v := range creds {
+		if v = strings.TrimSpace(v); len(v) >= 4 {
+			msg = strings.ReplaceAll(msg, v, "***")
+		}
+	}
+	if msg == err.Error() {
+		return err
+	}
+	return errors.New(msg)
 }
 
 func short(s string) string {

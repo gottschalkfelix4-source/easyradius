@@ -1,3 +1,7 @@
+//go:build windows && (amd64 || arm64)
+
+// Die Puffer-Layouts unten gelten für 64-Bit-Windows.
+
 package directory
 
 import (
@@ -5,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -15,11 +20,13 @@ import (
 type Domain struct {
 	NetBIOS string // Name der Domäne, der der Rechner angehört
 
-	once    sync.Once
-	initErr error
-	lsa     windows.Handle
-	pkg     uint32
-	mu      sync.Mutex
+	initMu   sync.Mutex
+	inited   bool
+	initErr  error
+	initTime time.Time
+	lsa      windows.Handle
+	pkg      uint32
+	sem      chan struct{} // begrenzt gleichzeitige Anfragen an den DC
 }
 
 var (
@@ -52,7 +59,7 @@ func NewDomain() (*Domain, error) {
 	if !ok {
 		return nil, &Error{Msg: "Dieser Rechner ist kein Mitglied einer Domäne"}
 	}
-	return &Domain{NetBIOS: d}, nil
+	return &Domain{NetBIOS: d, sem: make(chan struct{}, 8)}, nil
 }
 
 func (d *Domain) Describe() string { return "Domäne " + d.NetBIOS }
@@ -68,8 +75,19 @@ func newLsaString(s string) *lsaString {
 	return &lsaString{Length: uint16(len(s)), MaximumLength: uint16(len(b)), Buffer: &b[0]}
 }
 
+// init verbindet sich mit der LSA. Schlägt das fehl (z. B. kurz nach dem Systemstart),
+// wird es nach 30 Sekunden erneut versucht.
 func (d *Domain) init() error {
-	d.once.Do(func() {
+	d.initMu.Lock()
+	defer d.initMu.Unlock()
+	if d.inited {
+		return nil
+	}
+	if d.initErr != nil && time.Since(d.initTime) < 30*time.Second {
+		return d.initErr
+	}
+	d.initErr, d.initTime = nil, time.Now()
+	func() {
 		var mode uint32
 		st, _, _ := procLsaRegisterLogonProc.Call(uintptr(unsafe.Pointer(newLsaString("EasyRadius"))),
 			uintptr(unsafe.Pointer(&d.lsa)), uintptr(unsafe.Pointer(&mode)))
@@ -82,8 +100,22 @@ func (d *Domain) init() error {
 		if st != 0 {
 			d.initErr = &Error{Msg: fmt.Sprintf("Authentifizierungspaket nicht gefunden (0x%08X)", uint32(st))}
 		}
-	})
+	}()
+	d.inited = d.initErr == nil
 	return d.initErr
+}
+
+var errForeignDomain = &Error{Msg: "Anmeldung nur für Konten der eigenen Domäne erlaubt", BadSecret: true}
+var errGuest = &Error{Msg: "Anmeldung als Gast ist nicht erlaubt", BadSecret: true}
+
+// validName lehnt Steuerzeichen ab (u. a. NUL, das die Windows-APIs abschneiden würden).
+func validName(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return s != ""
 }
 
 // ntStatusError übersetzt typische Anmeldefehler.
@@ -117,26 +149,51 @@ func ntStatusError(status, sub uint32) error {
 	return &Error{Msg: fmt.Sprintf("AD-Anmeldung fehlgeschlagen (Status 0x%08X)", code)}
 }
 
-func (d *Domain) domainFor(username string) (user, domain string) {
+// domainFor zerlegt den Namen. Erlaubt sind nur Konten der eigenen Domäne –
+// ".\Administrator" oder "RECHNER\konto" würden sonst lokale Konten prüfen.
+func (d *Domain) domainFor(username string) (user, domain string, err error) {
 	u, dom, upn := SplitName(username)
+	if !validName(u) {
+		return "", "", ErrBadCredentials
+	}
 	if upn {
-		return u + "@" + dom, "" // UPN: Domäne bleibt leer
+		if !validName(dom) || !strings.Contains(dom, ".") {
+			return "", "", errForeignDomain
+		}
+		return u + "@" + dom, "", nil // UPN: Domäne bleibt leer
 	}
 	if dom == "" {
 		dom = d.NetBIOS
 	}
-	return u, dom
+	if !strings.EqualFold(dom, d.NetBIOS) {
+		return "", "", errForeignDomain
+	}
+	return u, d.NetBIOS, nil
+}
+
+func (d *Domain) acquire() func() {
+	d.sem <- struct{}{}
+	return func() { <-d.sem }
 }
 
 // AuthPAP: Netzwerk-Anmeldung mit Klartextpasswort.
 func (d *Domain) AuthPAP(username, password string) (*User, error) {
-	user, dom := d.domainFor(username)
+	user, dom, err := d.domainFor(username)
+	if err != nil {
+		return nil, err
+	}
 	var domPtr *uint16
 	if dom != "" {
-		domPtr, _ = windows.UTF16PtrFromString(dom)
+		if domPtr, err = windows.UTF16PtrFromString(dom); err != nil {
+			return nil, ErrBadCredentials
+		}
 	}
-	u16, _ := windows.UTF16PtrFromString(user)
-	p16, _ := windows.UTF16PtrFromString(password)
+	u16, err1 := windows.UTF16PtrFromString(user)
+	p16, err2 := windows.UTF16PtrFromString(password)
+	if err1 != nil || err2 != nil {
+		return nil, ErrBadCredentials
+	}
+	defer d.acquire()()
 	var tok windows.Token
 	r, _, e := procLogonUserW.Call(uintptr(unsafe.Pointer(u16)), uintptr(unsafe.Pointer(domPtr)), uintptr(unsafe.Pointer(p16)),
 		3 /* LOGON32_LOGON_NETWORK */, 0, uintptr(unsafe.Pointer(&tok)))
@@ -170,7 +227,10 @@ func (d *Domain) AuthMSCHAPv2(username string, challenge8, ntResponse []byte) (*
 	if err := d.init(); err != nil {
 		return nil, nil, err
 	}
-	user, dom := d.domainFor(username)
+	user, dom, err := d.domainFor(username)
+	if err != nil {
+		return nil, nil, err
+	}
 	if len(challenge8) != 8 || len(ntResponse) != 24 {
 		return nil, nil, &Error{Msg: "Ungültige MS-CHAPv2-Daten"}
 	}
@@ -220,12 +280,12 @@ func (d *Domain) AuthMSCHAPv2(username string, challenge8, ntResponse []byte) (*
 		quotas     [6]uint64
 		sub        uint32
 	)
-	d.mu.Lock()
+	release := d.acquire()
 	st, _, _ := procLsaLogonUser.Call(uintptr(d.lsa), uintptr(unsafe.Pointer(newLsaString("EasyRadius"))),
 		3 /* Network */, uintptr(d.pkg), mem, uintptr(size), 0, uintptr(unsafe.Pointer(&src)),
 		uintptr(unsafe.Pointer(&profile)), uintptr(unsafe.Pointer(&profileLen)), uintptr(unsafe.Pointer(&logonID)),
 		uintptr(unsafe.Pointer(&tok)), uintptr(unsafe.Pointer(&quotas)), uintptr(unsafe.Pointer(&sub)))
-	d.mu.Unlock()
+	release()
 	if st != 0 {
 		return nil, nil, ntStatusError(uint32(st), sub)
 	}
@@ -236,6 +296,10 @@ func (d *Domain) AuthMSCHAPv2(username string, challenge8, ntResponse []byte) (*
 	// MSV1_0_LM20_LOGON_PROFILE: UserSessionKey liegt bei Offset 28 (= MD4 des NT-Hashes).
 	if profile == 0 || profileLen < 44 {
 		return nil, nil, &Error{Msg: "Domänencontroller lieferte keinen Sitzungsschlüssel"}
+	}
+	// UserFlags (Offset 24): LOGON_GUEST – der DC hat auf das Gastkonto ausgewichen.
+	if le.Uint32(unsafe.Slice((*byte)(unsafe.Pointer(profile+24)), 4))&0x01 != 0 {
+		return nil, nil, errGuest
 	}
 	key := append([]byte(nil), unsafe.Slice((*byte)(unsafe.Pointer(profile+28)), 16)...)
 	if allZero(key) {
@@ -255,7 +319,10 @@ func allZero(b []byte) bool {
 }
 
 func utf16Bytes(s string) []byte {
-	u, _ := windows.UTF16FromString(s)
+	u, err := windows.UTF16FromString(s)
+	if err != nil || len(u) == 0 {
+		return nil
+	}
 	u = u[:len(u)-1]
 	b := make([]byte, len(u)*2)
 	for i, c := range u {
@@ -264,14 +331,31 @@ func utf16Bytes(s string) []byte {
 	return b
 }
 
+// isGuestSID erkennt Gast- (RID 501) und anonyme Konten (S-1-5-7).
+func isGuestSID(sid *windows.SID) bool {
+	if sid == nil {
+		return true
+	}
+	if sid.String() == "S-1-5-7" {
+		return true
+	}
+	n := sid.SubAuthorityCount()
+	return n > 0 && sid.SubAuthority(uint32(n-1)) == 501
+}
+
 // userFromToken liest Benutzer und alle Gruppen (inkl. verschachtelter) aus dem Anmeldetoken.
 func userFromToken(tok windows.Token, username string) (*User, error) {
 	name, _, _ := SplitName(username)
 	u := &User{Name: name}
-	if tu, err := tok.GetTokenUser(); err == nil {
-		if acc, dom, _, err := tu.User.Sid.LookupAccount(""); err == nil {
-			u.Name, u.Domain = acc, dom
-		}
+	tu, err := tok.GetTokenUser()
+	if err != nil {
+		return nil, &Error{Msg: "AD-Konto konnte nicht gelesen werden"}
+	}
+	if isGuestSID(tu.User.Sid) {
+		return nil, errGuest
+	}
+	if acc, dom, _, err := tu.User.Sid.LookupAccount(""); err == nil {
+		u.Name, u.Domain = acc, dom
 	}
 	groups, err := tok.GetTokenGroups()
 	if err != nil {

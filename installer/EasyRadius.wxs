@@ -13,7 +13,10 @@
            Compressed="yes">
     <SummaryInformation Description="EasyRadius – einfacher RADIUS-Server mit Weboberfläche" Manufacturer="EasyRadius" />
 
-    <MajorUpgrade DowngradeErrorMessage="Eine neuere Version von EasyRadius ist bereits installiert." />
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="Eine neuere Version von EasyRadius ist bereits installiert." />
+
+    <!-- Laufende Verwaltungs-App vor dem Austausch schließen. -->
+    <util:CloseApplication Id="CloseManager" Target="EasyRadiusManager.exe" CloseMessage="yes" RebootPrompt="no" />
     <MediaTemplate EmbedCab="yes" />
 
     <Icon Id="AppIcon" SourceFile="assets\icon.ico" />
@@ -43,7 +46,7 @@
         <ServiceInstall Id="Svc"
                         Name="EasyRadius"
                         DisplayName="EasyRadius RADIUS-Server"
-                        Description="RADIUS-Server für WLAN (WPA2/WPA3-Enterprise) und Netzwerkgeräte. Weboberfläche: http://localhost:8088"
+                        Description="RADIUS-Server für WLAN (WPA2/WPA3-Enterprise) und Netzwerkgeräte. Weboberfläche: http://localhost:8088 bzw. https://SERVER:8443"
                         Type="ownProcess"
                         Start="auto"
                         ErrorControl="normal"
@@ -67,25 +70,27 @@
         </File>
       </Component>
 
+      <!-- Freigaben nur für EasyRadius.exe und nur im privaten bzw. Firmennetz (nicht in öffentlichen Netzen).
+           Port 80 (Let's Encrypt per HTTP) wird nicht dauerhaft geöffnet. -->
       <Component Id="Firewall" Guid="5B2E8D41-0F3C-4A7B-8E6D-9C1A2B3D4E5F" Bitness="always64">
         <CreateFolder />
-        <fw:FirewallException Id="FwRadiusAuth" Name="EasyRadius RADIUS (UDP 1812)"
-                              Port="1812" Protocol="udp" Scope="any" Profile="all" />
-        <fw:FirewallException Id="FwRadiusAcct" Name="EasyRadius Accounting (UDP 1813)"
-                              Port="1813" Protocol="udp" Scope="any" Profile="all" />
-        <fw:FirewallException Id="FwAcmeHttp" Name="EasyRadius Let's-Encrypt-Prüfung (TCP 80)"
-                              Port="80" Protocol="tcp" Scope="any" Profile="all" />
-        <fw:FirewallException Id="FwWeb" Name="EasyRadius Weboberfläche (TCP 8088)"
-                              Port="8088" Protocol="tcp" Scope="any" Profile="private" />
-        <fw:FirewallException Id="FwWebDomain" Name="EasyRadius Weboberfläche im Firmennetz (TCP 8088)"
-                              Port="8088" Protocol="tcp" Scope="any" Profile="domain" />
+        <fw:FirewallException Id="FwRadiusPrivate" Name="EasyRadius RADIUS (UDP 1812/1813)"
+                              Program="[#EasyRadiusExe]" Port="1812,1813" Protocol="udp" Scope="any" Profile="private" />
+        <fw:FirewallException Id="FwRadiusDomain" Name="EasyRadius RADIUS im Firmennetz (UDP 1812/1813)"
+                              Program="[#EasyRadiusExe]" Port="1812,1813" Protocol="udp" Scope="any" Profile="domain" />
+        <fw:FirewallException Id="FwWeb" Name="EasyRadius Weboberfläche (TCP 8088/8443)"
+                              Program="[#EasyRadiusExe]" Port="8088,8443" Protocol="tcp" Scope="any" Profile="private" />
+        <fw:FirewallException Id="FwWebDomain" Name="EasyRadius Weboberfläche im Firmennetz (TCP 8088/8443)"
+                              Program="[#EasyRadiusExe]" Port="8088,8443" Protocol="tcp" Scope="any" Profile="domain" />
       </Component>
     </DirectoryRef>
 
-    <!-- Nach der Erstinstallation die Verwaltung öffnen (nicht bei stiller Installation). -->
-    <CustomAction Id="OpenManager" FileRef="ManagerFile" ExeCommand="" Return="asyncNoWait" Execute="immediate" Impersonate="yes" />
+    <!-- Nach der Erstinstallation die Verwaltung öffnen (nicht bei Updates und stiller Installation).
+         Über explorer.exe startet sie mit normalen Benutzerrechten statt mit den Rechten des Installers. -->
+    <CustomAction Id="OpenManager" Directory="INSTALLFOLDER" ExeCommand="&quot;[WindowsFolder]explorer.exe&quot; &quot;[#ManagerFile]&quot;"
+                  Return="asyncNoWait" Execute="immediate" Impersonate="yes" />
     <InstallExecuteSequence>
-      <Custom Action="OpenManager" After="InstallFinalize" Condition="NOT Installed AND NOT REMOVE AND UILevel &gt; 3" />
+      <Custom Action="OpenManager" After="InstallFinalize" Condition="NOT Installed AND NOT REMOVE AND NOT WIX_UPGRADE_DETECTED AND UILevel &gt; 3" />
     </InstallExecuteSequence>
   </Package>
 </Wix>

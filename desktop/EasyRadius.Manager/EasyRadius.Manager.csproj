@@ -9,6 +9,7 @@
     <AssemblyName>EasyRadiusManager</AssemblyName>
     <RootNamespace>EasyRadius.Manager</RootNamespace>
     <ApplicationIcon>..\..\assets\icon.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <Product>EasyRadius</Product>
     <AssemblyTitle>EasyRadius Verwaltung</AssemblyTitle>
     <Description>Verwaltung für EasyRadius</Description>

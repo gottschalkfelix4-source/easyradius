@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Media;
@@ -19,8 +20,17 @@ namespace EasyRadius.Manager;
 /// </summary>
 public class AttributeEditor : UserControl
 {
-    static AttrDictionary? dict;
-    public static async Task<AttrDictionary> Dictionary() => dict ??= await App.Api.Get<AttrDictionary>("/api/attributes");
+    // Je Serververbindung zwischengespeichert: nach einem Serverwechsel (neuer ApiClient) wird neu geladen.
+    static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ApiClient, AttrDictionary> dicts = new();
+
+    public static async Task<AttrDictionary> Dictionary()
+    {
+        var api = App.Api;
+        if (dicts.TryGetValue(api, out var cached)) return cached;
+        var d = await api.Get<AttrDictionary>("/api/attributes");
+        dicts.AddOrUpdate(api, d);
+        return d;
+    }
 
     readonly ObservableCollection<Attr> items;
     readonly AttrDictionary d;
@@ -57,6 +67,9 @@ public class AttributeEditor : UserControl
         list.SelectionChanged += (_, _) => Load(list.SelectedItem as Attr);
 
         // Eingabezeile
+        foreach (var (c, n) in new (FrameworkElement, string)[] { (list, "Attribute"), (kind, "Check oder Reply"), (attr, "Attribut"), (vendor, "Hersteller-ID"),
+                     (code, "Attributnummer"), (type, "Datentyp"), (tag, "Tag"), (value, "Wert"), (presets, "Vorlage einfügen") })
+            AutomationProperties.SetName(c, n);
         var bar = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
         foreach (var c in new FrameworkElement[] { kind, attr, vendor, code, type, tag })
         {
@@ -77,8 +90,7 @@ public class AttributeEditor : UserControl
         root.Children.Add(new Border
         {
             Child = list, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6),
-            BorderBrush = UI.Brush("ControlStrokeColorDefaultBrush"),
-        });
+        }.Res(Border.BorderBrushProperty, "ControlStrokeColorDefaultBrush"));
         root.Children.Add(bar);
         root.Children.Add(help);
         root.Children.Add(presets);
@@ -99,7 +111,8 @@ public class AttributeEditor : UserControl
             {
                 var x = a.Copy();
                 if (string.IsNullOrEmpty(x.Kind)) x.Kind = "reply";
-                var i = items.ToList().FindIndex(y => y.Kind == x.Kind && y.VendorId == x.VendorId && y.Code == x.Code);
+                // Nur dasselbe Attribut (Typ, Hersteller, Nummer und Tag) wird ersetzt, alles andere ergänzt.
+                var i = items.ToList().FindIndex(y => y.Kind == x.Kind && y.VendorId == x.VendorId && y.Code == x.Code && y.Tag == x.Tag);
                 if (i >= 0) items[i] = x; else items.Add(x);
             }
             presets.SelectedIndex = 0;
@@ -116,9 +129,9 @@ public class AttributeEditor : UserControl
         {
             var style = new Style(typeof(TextBlock));
             var trig = new DataTrigger { Binding = new Binding(nameof(Attr.IsCheck)), Value = true };
-            trig.Setters.Add(new Setter(TextBlock.ForegroundProperty, Application.Current.FindResource("CheckBrush")));
+            trig.Setters.Add(new Setter(TextBlock.ForegroundProperty, new DynamicResourceExtension("CheckBrush")));
             style.Triggers.Add(trig);
-            style.Setters.Add(new Setter(TextBlock.ForegroundProperty, Application.Current.FindResource("ReplyBrush")));
+            style.Setters.Add(new Setter(TextBlock.ForegroundProperty, new DynamicResourceExtension("ReplyBrush")));
             f.SetValue(TextBlock.StyleProperty, style);
         }
         else f.SetValue(TextBlock.FontFamilyProperty, new FontFamily("Cascadia Mono, Consolas"));
@@ -201,9 +214,14 @@ public class AttributeEditor : UserControl
         a.Value = val;
         if (a.Tagged) { byte.TryParse(tag.Text, out var t); a.Tag = t; }
 
-        var idx = list.SelectedItem is Attr sel ? items.IndexOf(sel)
-            : items.ToList().FindIndex(x => x.Kind == a.Kind && x.VendorId == a.VendorId && x.Code == a.Code);
-        if (idx >= 0) items[idx] = a; else items.Add(a);
+        // „Ändern“ ersetzt die gewählte Zeile; „Hinzufügen“ hängt an – auch mehrfach dasselbe Attribut
+        // (z. B. mehrere Cisco-AVPair). Nur ein völlig gleicher Eintrag wird nicht doppelt angelegt.
+        if (list.SelectedItem is Attr sel && items.IndexOf(sel) is var idx and >= 0) items[idx] = a;
+        else if (items.Any(x => x.Kind == a.Kind && x.VendorId == a.VendorId && x.Code == a.Code && x.Tag == a.Tag && x.Value == a.Value))
+        {
+            if (!silent) _ = UI.Toast("Dieses Attribut mit diesem Wert ist bereits vorhanden", true);
+        }
+        else items.Add(a);
         Clear();
         return true;
     }
