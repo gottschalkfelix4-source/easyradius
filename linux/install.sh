@@ -84,8 +84,11 @@ if [ -n "$FILE" ]; then
 else
   if [ -z "$VERSION" ]; then
     step "Suche die neueste Version"
-    VERSION="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep -m1 '"tag_name"' | cut -d'"' -f4)"
+    # Die Weiterleitung von …/releases/latest zeigt auf …/tag/vX.Y.Z (ohne API-Limit, ohne Pipe).
+    LATEST="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest")" || LATEST=""
+    VERSION="${LATEST##*/}"
     VERSION="${VERSION#v}"
+    [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || VERSION=""
     [ -n "$VERSION" ] || die "Konnte die neueste Version nicht ermitteln (Internetzugang?)."
   fi
   NAME="easyradius-$VERSION-linux-$ARCH.tar.gz"

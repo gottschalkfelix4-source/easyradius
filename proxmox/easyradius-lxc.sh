@@ -103,7 +103,7 @@ for v in 13 12; do
   [ -n "$TEMPLATE" ] && break
 done
 [ -n "$TEMPLATE" ] || die "Keine Debian-Vorlage gefunden (Internetzugang des Hosts?)."
-if ! pveam list "$CT_TEMPLATE_STORAGE" 2>/dev/null | grep -q "$TEMPLATE"; then
+if ! grep -q "$TEMPLATE" <<<"$(pveam list "$CT_TEMPLATE_STORAGE" 2>/dev/null)"; then
   pveam download "$CT_TEMPLATE_STORAGE" "$TEMPLATE" >/dev/null || die "Download der Vorlage fehlgeschlagen."
 fi
 ok "$TEMPLATE"
