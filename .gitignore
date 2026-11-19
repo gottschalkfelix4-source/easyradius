@@ -1,0 +1,9 @@
+build/
+devdata/
+data/
+.wix/
+*.wixpdb
+*.log
+*.exe
+*.msi
+*.syso

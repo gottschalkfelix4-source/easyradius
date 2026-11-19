@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:fw="http://wixtoolset.org/schemas/v4/wxs/firewall"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Package Name="EasyRadius"
+           Manufacturer="EasyRadius"
+           Version="$(var.Version)"
+           UpgradeCode="6F0C3D7A-2B1E-4E8B-9A57-3C1D2E4F5A61"
+           Language="1031"
+           Codepage="1252"
+           Scope="perMachine"
+           Compressed="yes">
+    <SummaryInformation Description="EasyRadius – einfacher RADIUS-Server mit Weboberfläche" Manufacturer="EasyRadius" />
+
+    <MajorUpgrade DowngradeErrorMessage="Eine neuere Version von EasyRadius ist bereits installiert." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon" SourceFile="assets\icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="http://localhost:8088/" />
+    <Property Id="ARPHELPLINK" Value="http://localhost:8088/" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="EasyRadius" />
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="EasyRadius" Level="1">
+      <ComponentRef Id="MainExe" />
+      <ComponentRef Id="Firewall" />
+    </Feature>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="MainExe" Guid="1C9E5B0A-7E54-4C55-9C8F-0A6C2B7D8E91" Bitness="always64">
+        <File Id="EasyRadiusExe" Source="build\EasyRadius.exe" KeyPath="yes">
+          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="EasyRadius"
+                    Description="Weboberfläche von EasyRadius öffnen" Arguments="open"
+                    Icon="AppIcon" Advertise="no" WorkingDirectory="INSTALLFOLDER" />
+          <Shortcut Id="DesktopShortcut" Directory="DesktopFolder" Name="EasyRadius"
+                    Description="Weboberfläche von EasyRadius öffnen" Arguments="open"
+                    Icon="AppIcon" Advertise="no" WorkingDirectory="INSTALLFOLDER" />
+        </File>
+        <File Id="IconFile" Source="assets\icon.ico" />
+
+        <ServiceInstall Id="Svc"
+                        Name="EasyRadius"
+                        DisplayName="EasyRadius RADIUS-Server"
+                        Description="RADIUS-Server für WLAN (WPA2/WPA3-Enterprise) und Netzwerkgeräte. Weboberfläche: http://localhost:8088"
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Account="LocalSystem"
+                        Vital="yes">
+          <util:ServiceConfig FirstFailureActionType="restart"
+                              SecondFailureActionType="restart"
+                              ThirdFailureActionType="restart"
+                              RestartServiceDelayInSeconds="10"
+                              ResetPeriodInDays="1" />
+        </ServiceInstall>
+        <ServiceControl Id="SvcControl" Name="EasyRadius" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+      </Component>
+
+      <Component Id="Firewall" Guid="5B2E8D41-0F3C-4A7B-8E6D-9C1A2B3D4E5F" Bitness="always64">
+        <CreateFolder />
+        <fw:FirewallException Id="FwRadiusAuth" Name="EasyRadius RADIUS (UDP 1812)"
+                              Port="1812" Protocol="udp" Scope="any" Profile="all" />
+        <fw:FirewallException Id="FwRadiusAcct" Name="EasyRadius Accounting (UDP 1813)"
+                              Port="1813" Protocol="udp" Scope="any" Profile="all" />
+        <fw:FirewallException Id="FwAcmeHttp" Name="EasyRadius Let's-Encrypt-Prüfung (TCP 80)"
+                              Port="80" Protocol="tcp" Scope="any" Profile="all" />
+        <fw:FirewallException Id="FwWeb" Name="EasyRadius Weboberfläche (TCP 8088)"
+                              Port="8088" Protocol="tcp" Scope="localSubnet" Profile="all" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Nach der Erstinstallation die Weboberfläche öffnen (nicht bei stiller Installation). -->
+    <CustomAction Id="OpenWebUI" FileRef="EasyRadiusExe" ExeCommand="open" Return="asyncNoWait" Execute="immediate" />
+    <InstallExecuteSequence>
+      <Custom Action="OpenWebUI" After="InstallFinalize" Condition="NOT Installed AND NOT REMOVE AND UILevel &gt; 3" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>
